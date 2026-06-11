@@ -31,6 +31,7 @@ add_library(qcc_core STATIC
     src/status/status.c
     src/source/source.c
     src/diag/diag.c
+    src/token/token.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include
