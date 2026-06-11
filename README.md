@@ -10,7 +10,9 @@ project's central milestone.
 > [ADR-0002 self-host then disown](../Quicks-Meta/docs/adr/0002-bootstrap-self-host-then-disown.md).
 
 ## Status
-**Phase 4 — not started.** Built with the seed compiler first; then subjected to the
+**Phase 4 — in progress.** Foundation laid: status, source, and diag modules with
+tests (the same proven base as qas/qld). Built with the seed compiler first; then
+subjected to the
 **self-compilation constraint**: `qcc` may use only the C subset `qcc` itself supports.
 
 ## Planned pipeline (large-scale by design — ADR/vision "hardest sensible option")
