@@ -32,6 +32,10 @@ add_library(qcc_core STATIC
     src/source/source.c
     src/diag/diag.c
     src/token/token.c
+    src/lexer/lexer.c
+    src/lexer/internal/cursor.c
+    src/lexer/internal/scan.c
+    src/lexer/internal/punct.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include

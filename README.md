@@ -10,9 +10,11 @@ project's central milestone.
 > [ADR-0002 self-host then disown](../Quicks-Meta/docs/adr/0002-bootstrap-self-host-then-disown.md).
 
 ## Status
-**Phase 4 — in progress.** Foundation laid: status, source, and diag modules with
-tests (the same proven base as qas/qld). Built with the seed compiler first; then
-subjected to the
+**Phase 4 — in progress.** Pipeline stage 1 (the lexer) is done: translation
+phases 1-3 per ISO C11 §5.1.1.2 — line splicing everywhere, comments to one
+space, maximal-munch pp-tokens with digraphs, literal prefixes, UCNs, and the
+contextual header-name mode — on top of the foundation modules (status, source,
+diag, token), all tested. Built with the seed compiler first; then subjected to the
 **self-compilation constraint**: `qcc` may use only the C subset `qcc` itself supports.
 
 ## Planned pipeline (large-scale by design — ADR/vision "hardest sensible option")
