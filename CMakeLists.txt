@@ -31,6 +31,7 @@ add_library(qcc_core STATIC
     src/status/status.c
     src/source/source.c
     src/diag/diag.c
+    src/arena/arena.c
     src/token/token.c
     src/lexer/lexer.c
     src/lexer/internal/cursor.c
