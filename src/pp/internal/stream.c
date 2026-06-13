@@ -49,6 +49,8 @@ static void make_eof(qcc_ptok *out)
     out->offset        = 0;
     out->line          = 0;
     out->column        = 0;
+    out->presumed_line = 0;
+    out->presumed_file = NULL;
     out->leading_space = 0;
     out->at_line_start = 1;
     out->hideset       = NULL;
@@ -57,12 +59,16 @@ static void make_eof(qcc_ptok *out)
 /*
  * Materialize one lexer token (span-backed) into *out: recover its splice-free
  * spelling into the stream's scratch buffer (grown as needed) and intern it,
- * then copy kind/punct/provenance/flags with an empty hide set. Returns QCC_OK
- * or QCC_ERR_OUT_OF_MEMORY.
+ * then copy kind/punct/provenance/flags with an empty hide set. The presumed
+ * line/file (§6.10.4) are stamped from the file input's current #line shift, so
+ * `__LINE__`/`__FILE__` read them with no further lookup (ADR-0016). Returns
+ * QCC_OK or QCC_ERR_OUT_OF_MEMORY.
  */
-static qcc_status materialize(qcc_pp_stream *stream, const qcc_source *src,
+static qcc_status materialize(qcc_pp_stream *stream, const qcc_pp_input *frame,
                               const qcc_pp_token *in, qcc_ptok *out)
 {
+    const qcc_source *src = frame->source;
+
     if (in->length > stream->scratch_cap) {
         char *grown = (char *)realloc(stream->scratch, in->length);
         if (grown == NULL) {
@@ -87,6 +93,9 @@ static qcc_status materialize(qcc_pp_stream *stream, const qcc_source *src,
     out->offset        = in->offset;
     out->line          = in->line;
     out->column        = in->column;
+    out->presumed_line =
+        (uint32_t)((int64_t)in->line + (int64_t)frame->presumed_delta);
+    out->presumed_file = frame->presumed_file;
     out->leading_space = in->leading_space;
     out->at_line_start = in->at_line_start;
     out->hideset       = NULL;
@@ -226,7 +235,7 @@ qcc_status qcc_pp_stream_next(qcc_pp_stream *stream, qcc_ptok *out,
         if (raw.kind == QCC_PP_TOKEN_EOF) {
             if (frame->below == NULL) {
                 /* Outermost file ended: this is the translation unit's EOF. */
-                st = materialize(stream, frame->source, &raw, out);
+                st = materialize(stream, frame, &raw, out);
                 if (st != QCC_OK) {
                     return st;
                 }
@@ -238,7 +247,7 @@ qcc_status qcc_pp_stream_next(qcc_pp_stream *stream, qcc_ptok *out,
             continue;
         }
 
-        st = materialize(stream, frame->source, &raw, out);
+        st = materialize(stream, frame, &raw, out);
         if (st != QCC_OK) {
             return st;
         }
@@ -332,4 +341,37 @@ qcc_status qcc_pp_stream_next_header(qcc_pp_stream *stream, qcc_ptok *out,
         qcc_lexer_set_header_mode(&frame->lexer, 0);
     }
     return st;
+}
+
+/* The topmost file (lexer) input, skipping macro-rescan inputs, or NULL. */
+static qcc_pp_input *top_lexer(qcc_pp_stream *stream)
+{
+    for (qcc_pp_input *f = stream->top; f != NULL; f = f->below) {
+        if (f->kind == QCC_PP_INPUT_LEXER) {
+            return f;
+        }
+    }
+    return NULL;
+}
+
+void qcc_pp_stream_set_presumed_line(qcc_pp_stream *stream, int32_t delta)
+{
+    if (stream == NULL) {
+        return;
+    }
+    qcc_pp_input *frame = top_lexer(stream);
+    if (frame != NULL) {
+        frame->presumed_delta = delta;
+    }
+}
+
+void qcc_pp_stream_set_presumed_file(qcc_pp_stream *stream, const char *file)
+{
+    if (stream == NULL) {
+        return;
+    }
+    qcc_pp_input *frame = top_lexer(stream);
+    if (frame != NULL) {
+        frame->presumed_file = file;
+    }
 }

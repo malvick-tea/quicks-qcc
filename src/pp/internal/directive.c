@@ -5,15 +5,15 @@
  * function-like, including variadic) and #undef plus the null directive
  * (§6.10.7), the conditional-inclusion directives (§6.10.1), #include (§6.10.2)
  * in all three forms (<...>, "...", and the macro-expanded "computed include"),
- * and the diagnostic/marker directives #error (§6.10.5) and #pragma (§6.10.6,
- * recognized and ignored). #line (§6.10.4) is diagnosed-and-skipped until it
- * lands.
+ * the diagnostic/marker directives #error (§6.10.5) and #pragma (§6.10.6,
+ * recognized and ignored), and #line (§6.10.4, presumed line/file per ADR-0016).
+ * This completes the §6.10 directive set.
  *
  * Spec anchors: §6.10.3 (macro definition), §6.10.3 ¶5 (__VA_ARGS__ / reserved
  * parameter rules), §6.10.3.2 ¶1 (# must precede a parameter), §6.10.3.3 ¶1
  * (## not at either end of a replacement list), §6.10.3.5 (#undef), §6.10.2
- * (#include and the search path; resolution policy in ADR-0015), §6.10.5
- * (#error), §6.10.6 (#pragma).
+ * (#include and the search path; resolution policy in ADR-0015), §6.10.4
+ * (#line), §6.10.5 (#error), §6.10.6 (#pragma).
  */
 #include "pp/internal/directive.h"
 
@@ -810,6 +810,115 @@ static qcc_status do_pragma(qcc_pp *pp, qcc_pp_stream *stream)
     return skip_to_line_end(stream);
 }
 
+/* The §6.10.4 ¶3 upper bound on a presumed line number. */
+#define QCC_LINE_MAX ((uint64_t)2147483647u)
+
+/*
+ * #line (§6.10.4): set the presumed line number — and optionally file name — of
+ * the source line that follows. The argument tokens are macro-expanded (¶5) and
+ * must then be a decimal digit-sequence optionally followed by a "filename"
+ * string literal. The presumed number applies to the next physical line, so the
+ * stream is told a per-file delta (presumed_line = physical_line + delta);
+ * __LINE__/__FILE__ read it (ADR-0016). `name` is the directive-name token,
+ * whose physical line anchors the delta.
+ */
+static qcc_status do_line(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *name)
+{
+    qcc_ptok_list line;
+    qcc_ptok_list_init(&line);
+    qcc_status st = collect_replacement(stream, &line);
+
+    qcc_ptok_list expanded;
+    qcc_ptok_list_init(&expanded);
+    if (st == QCC_OK) {
+        st = qcc_pp_expand_all(pp, line.items, line.count, &expanded);
+    }
+    qcc_ptok_list_dispose(&line);
+    if (st != QCC_OK) {
+        qcc_ptok_list_dispose(&expanded);
+        return st;
+    }
+
+    if (expanded.count == 0 ||
+        expanded.items[0].kind != QCC_PP_TOKEN_PP_NUMBER) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name->source, name->offset,
+                      tok_span(name),
+                      "#line directive requires a positive integer argument");
+        qcc_ptok_list_dispose(&expanded);
+        return QCC_OK;
+    }
+
+    /* Parse the decimal digit-sequence (§6.10.4 ¶3: decimal digits only). */
+    const qcc_ptok *numtok = &expanded.items[0];
+    uint64_t        value    = 0;
+    int             all_digit = (numtok->spelling_len > 0);
+    int             overflow  = 0;
+    for (size_t i = 0; i < numtok->spelling_len; ++i) {
+        char c = numtok->spelling[i];
+        if (c < '0' || c > '9') {
+            all_digit = 0;
+            break;
+        }
+        value = value * 10u + (uint64_t)(c - '0');
+        if (value > QCC_LINE_MAX) {
+            overflow = 1;
+        }
+    }
+    if (!all_digit) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, numtok->source, numtok->offset,
+                      tok_span(numtok),
+                      "#line directive requires a positive integer argument");
+        qcc_ptok_list_dispose(&expanded);
+        return QCC_OK;
+    }
+    if (value == 0 || overflow) {
+        /* §6.10.4 ¶3 is a constraint; diagnose, then proceed best-effort. */
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, numtok->source, numtok->offset,
+                      tok_span(numtok),
+                      "#line directive line number is out of range "
+                      "[1, 2147483647]");
+        value = (value == 0) ? 1u : QCC_LINE_MAX;
+    }
+
+    /* Optional filename: a string literal whose inner bytes name the file
+       (§6.10.4 does not process escape sequences — take them verbatim). */
+    const char *file      = NULL;
+    int         have_file = 0;
+    if (expanded.count >= 2) {
+        const qcc_ptok *ft = &expanded.items[1];
+        if (ft->kind == QCC_PP_TOKEN_STRING_LIT && ft->spelling_len >= 2 &&
+            ft->spelling[0] == '"') {
+            file = qcc_pp_intern(pp, ft->spelling + 1, ft->spelling_len - 2);
+            if (file == NULL) {
+                qcc_ptok_list_dispose(&expanded);
+                return QCC_ERR_OUT_OF_MEMORY;
+            }
+            have_file = 1;
+        } else {
+            qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, ft->source, ft->offset,
+                          tok_span(ft), "invalid filename in #line directive");
+            qcc_ptok_list_dispose(&expanded);
+            return QCC_OK;
+        }
+    }
+    if (expanded.count > (size_t)(have_file ? 2 : 1)) {
+        const qcc_ptok *extra = &expanded.items[have_file ? 2 : 1];
+        qcc_diag_emit(pp->diags, QCC_DIAG_WARNING, extra->source, extra->offset,
+                      tok_span(extra), "extra tokens at end of #line directive");
+    }
+
+    /* The directive sits on physical line L; the next line (L+1) is presumed to
+       be `value`, so presumed_line(P) = P + (value - (L + 1)) (§6.10.4). */
+    int64_t delta = (int64_t)value - ((int64_t)name->line + 1);
+    qcc_pp_stream_set_presumed_line(stream, (int32_t)delta);
+    if (have_file) {
+        qcc_pp_stream_set_presumed_file(stream, file);
+    }
+
+    qcc_ptok_list_dispose(&expanded);
+    return QCC_OK;
+}
+
 /* Public interface. */
 
 qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *hash)
@@ -874,8 +983,11 @@ qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *h
         if (strcmp(name.spelling, "pragma") == 0) {
             return do_pragma(pp, stream);
         }
-        /* #line lands in a later step; diagnose any other directive so an
-           unknown one is never silently accepted. */
+        if (strcmp(name.spelling, "line") == 0) {
+            return do_line(pp, stream, &name);
+        }
+        /* Every §6.10 directive is handled above; anything else is unknown and
+           must never be silently accepted. */
         qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
                       tok_span(&name),
                       "unsupported preprocessing directive '#%s'", name.spelling);

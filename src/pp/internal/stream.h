@@ -27,6 +27,7 @@
 #define QCC_PP_INTERNAL_STREAM_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "lexer/lexer.h"
 #include "pp/pp.h"
@@ -51,6 +52,9 @@ typedef struct qcc_pp_input {
 
     qcc_lexer            lexer;    /* LEXER: the lexer state.                     */
     const qcc_source    *source;   /* LEXER: the source being lexed.             */
+    int32_t              presumed_delta; /* LEXER: presumed_line - physical_line
+                                            from #line (§6.10.4); 0 if none.      */
+    const char          *presumed_file;  /* LEXER: #line file override, or NULL. */
 
     const qcc_ptok      *toks;     /* TOKENS: borrowed token array.              */
     size_t               count;    /* TOKENS: number of tokens.                  */
@@ -159,5 +163,22 @@ size_t qcc_pp_stream_lexer_depth(const qcc_pp_stream *stream);
  */
 qcc_status qcc_pp_stream_next_header(qcc_pp_stream *stream, qcc_ptok *out,
                                      int *from_expansion);
+
+/*
+ * Install the presumed-line shift of a `#line` directive (§6.10.4) on the
+ * current file input: every later token from that file is materialized with
+ * `presumed_line = physical_line + delta`. Applies to the topmost lexer input
+ * (skipping macro-rescan inputs); a no-op if there is no file input. The
+ * presumption is per-file, so it is dropped when the file is popped.
+ */
+void qcc_pp_stream_set_presumed_line(qcc_pp_stream *stream, int32_t delta);
+
+/*
+ * Install the presumed file name of a `#line` directive's second form
+ * (§6.10.4). `file` is borrowed (intern it so it outlives the stream) and
+ * becomes the `presumed_file` of every later token from the current file until
+ * the next change; NULL clears the override. Applies to the topmost lexer input.
+ */
+void qcc_pp_stream_set_presumed_file(qcc_pp_stream *stream, const char *file);
 
 #endif /* QCC_PP_INTERNAL_STREAM_H */

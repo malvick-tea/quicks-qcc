@@ -173,10 +173,11 @@ static qcc_status push_one(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *na
 
 /*
  * Expand a builtin macro (§6.10.8.1). __LINE__ becomes a pp-number of the use
- * site's line; __FILE__ becomes a string literal of the source name (with '"'
- * and '\' escaped). Provenance points at the use, so __LINE__ reflects where it
- * was written. (A __LINE__ reached through another macro currently reports the
- * replacement token's line; presumed-line tracking lands with #line.)
+ * site's *presumed* line; __FILE__ becomes a string literal of its *presumed*
+ * file name (with '"' and '\' escaped) — the presumption installed by any #line
+ * in force (§6.10.4, ADR-0016), which is the physical line/source name when no
+ * #line applies. (A __LINE__ reached through another macro reports the
+ * replacement token's presumed line, as for any replacement token.)
  */
 static qcc_status expand_builtin(qcc_pp *pp, qcc_pp_stream *stream,
                                  const qcc_ptok *name, const qcc_macro *macro)
@@ -190,7 +191,7 @@ static qcc_status expand_builtin(qcc_pp *pp, qcc_pp_stream *stream,
 
     if (macro->builtin == QCC_MACRO_BUILTIN_LINE) {
         char buf[32];
-        int  n = snprintf(buf, sizeof(buf), "%u", (unsigned)name->line);
+        int  n = snprintf(buf, sizeof(buf), "%u", (unsigned)name->presumed_line);
         if (n < 0) {
             return QCC_ERR_IO;
         }
@@ -202,7 +203,10 @@ static qcc_status expand_builtin(qcc_pp *pp, qcc_pp_stream *stream,
         tok.spelling     = sp;
         tok.spelling_len = (size_t)n;
     } else { /* QCC_MACRO_BUILTIN_FILE */
-        const char *fname = (name->source != NULL) ? name->source->name : "";
+        const char *fname = (name->presumed_file != NULL)
+                                ? name->presumed_file
+                                : ((name->source != NULL) ? name->source->name
+                                                          : "");
         size_t      flen  = strlen(fname);
         /* Worst case: every byte escaped, plus two quotes. */
         size_t      cap   = flen * 2u + 2u;

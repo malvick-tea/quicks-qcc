@@ -588,6 +588,56 @@ static void test_pragma_directive(void)
     cleanup(&pp, &d, &s, &out);
 }
 
+/* #line sets the presumed line (and file) that __LINE__/__FILE__ report. */
+static void test_line_directive(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+
+    /* The line after `#line 100` is presumed 100. */
+    QTEST_CHECK_EQ_INT(run("#line 100\n__LINE__\n", &pp, &d, &s, &out),
+                       QCC_OK, "run");
+    chk(&out, 0, QCC_PP_TOKEN_PP_NUMBER, "100");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "no errors");
+    cleanup(&pp, &d, &s, &out);
+
+    /* The presumption counts up over subsequent lines. */
+    QTEST_CHECK_EQ_INT(run("#line 100\n\n__LINE__\n", &pp, &d, &s, &out),
+                       QCC_OK, "run2");
+    chk(&out, 0, QCC_PP_TOKEN_PP_NUMBER, "101");
+    cleanup(&pp, &d, &s, &out);
+
+    /* The two-argument form also sets the presumed file. */
+    QTEST_CHECK_EQ_INT(run("#line 50 \"virtual.c\"\n__FILE__ __LINE__\n",
+                           &pp, &d, &s, &out), QCC_OK, "run3");
+    chk(&out, 0, QCC_PP_TOKEN_STRING_LIT, "\"virtual.c\"");
+    chk(&out, 1, QCC_PP_TOKEN_PP_NUMBER, "50");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "no errors");
+    cleanup(&pp, &d, &s, &out);
+
+    /* A presumed file persists until the next #line changes it. */
+    QTEST_CHECK_EQ_INT(run("#line 50 \"v.c\"\n#line 60\n__FILE__ __LINE__\n",
+                           &pp, &d, &s, &out), QCC_OK, "run4");
+    chk(&out, 0, QCC_PP_TOKEN_STRING_LIT, "\"v.c\"");
+    chk(&out, 1, QCC_PP_TOKEN_PP_NUMBER, "60");
+    cleanup(&pp, &d, &s, &out);
+
+    /* The argument is macro-expanded (§6.10.4 ¶5). */
+    QTEST_CHECK_EQ_INT(run("#define LN 200\n#line LN\n__LINE__\n",
+                           &pp, &d, &s, &out), QCC_OK, "run5");
+    chk(&out, 0, QCC_PP_TOKEN_PP_NUMBER, "200");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "no errors");
+    cleanup(&pp, &d, &s, &out);
+
+    /* A non-numeric or out-of-range argument is a diagnostic. */
+    QTEST_CHECK_EQ_INT(run("#line abc\n", &pp, &d, &s, &out), QCC_OK, "run6");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "non-integer #line");
+    cleanup(&pp, &d, &s, &out);
+
+    QTEST_CHECK_EQ_INT(run("#line 0\n", &pp, &d, &s, &out), QCC_OK, "run7");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "#line 0 out of range");
+    cleanup(&pp, &d, &s, &out);
+}
+
 /* Argument validation and NULL-safety. */
 static void test_invalid_args(void)
 {
@@ -641,6 +691,7 @@ int main(void)
     test_conditional_errors();
     test_error_directive();
     test_pragma_directive();
+    test_line_directive();
     test_invalid_args();
     return qtest_report("pp");
 }

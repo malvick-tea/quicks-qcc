@@ -88,6 +88,8 @@ static void synth_token(qcc_ptok *out, qcc_pp_token_kind kind, const char *spell
     out->offset        = anchor->offset;
     out->line          = anchor->line;
     out->column        = anchor->column;
+    out->presumed_line = anchor->presumed_line;
+    out->presumed_file = anchor->presumed_file;
     out->leading_space = 0;
     out->at_line_start = 0;
     out->hideset       = NULL;

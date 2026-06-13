@@ -64,7 +64,12 @@ struct qcc_incl;
  *                     token (from # or ##), source is the macro's source and
  *                     offset points at the construct that produced it, so
  *                     diagnostics still land somewhere meaningful.
- *   line/column     : 1-based location of `offset` in `source` (cached).
+ *   line/column     : 1-based PHYSICAL location of `offset` in `source` (cached).
+ *   presumed_line   : the §6.10.4 presumed line — equal to `line` unless a
+ *                     `#line` directive shifted it; this is what `__LINE__`
+ *                     reports (§6.10.8.1).
+ *   presumed_file   : the §6.10.4 presumed file name (interned), or NULL to use
+ *                     `source->name`; this is what `__FILE__` reports.
  *   leading_space   : whitespace/comment preceded this token (§6.10.3.2 spacing).
  *   at_line_start   : first token on its logical line (a directive's '#' test).
  *   hideset         : macro names not to expand into this token (§6.10.3.4);
@@ -79,6 +84,8 @@ typedef struct qcc_ptok {
     size_t             offset;
     uint32_t           line;
     uint32_t           column;
+    uint32_t           presumed_line;
+    const char        *presumed_file;
     unsigned           leading_space : 1;
     unsigned           at_line_start : 1;
     const qcc_hideset *hideset;
