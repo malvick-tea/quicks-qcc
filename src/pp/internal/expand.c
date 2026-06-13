@@ -144,6 +144,95 @@ static int param_index(const qcc_macro *macro, const char *spelling)
     return -1;
 }
 
+/*
+ * Push a single synthesized token as a one-token expansion of `name`, carrying
+ * the call site's leading-space and the object-like hide set HS(name) ∪ {name}.
+ * Used by the builtin macros (__LINE__/__FILE__), which produce one token.
+ */
+static qcc_status push_one(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *name,
+                           qcc_ptok tok)
+{
+    const qcc_hideset *new_hs = NULL;
+    qcc_status st = qcc_hideset_add(&pp->arena, name->hideset, name->spelling,
+                                    &new_hs);
+    if (st != QCC_OK) {
+        return st;
+    }
+    tok.hideset       = new_hs;
+    tok.leading_space = name->leading_space;
+    tok.at_line_start = 0;
+
+    qcc_ptok *copy =
+        (qcc_ptok *)qcc_arena_alloc(&pp->arena, sizeof(*copy), _Alignof(qcc_ptok));
+    if (copy == NULL) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    *copy = tok;
+    return qcc_pp_stream_push_tokens(stream, copy, 1);
+}
+
+/*
+ * Expand a builtin macro (§6.10.8.1). __LINE__ becomes a pp-number of the use
+ * site's line; __FILE__ becomes a string literal of the source name (with '"'
+ * and '\' escaped). Provenance points at the use, so __LINE__ reflects where it
+ * was written. (A __LINE__ reached through another macro currently reports the
+ * replacement token's line; presumed-line tracking lands with #line.)
+ */
+static qcc_status expand_builtin(qcc_pp *pp, qcc_pp_stream *stream,
+                                 const qcc_ptok *name, const qcc_macro *macro)
+{
+    qcc_ptok tok;
+    memset(&tok, 0, sizeof(tok));
+    tok.source = name->source;
+    tok.offset = name->offset;
+    tok.line   = name->line;
+    tok.column = name->column;
+
+    if (macro->builtin == QCC_MACRO_BUILTIN_LINE) {
+        char buf[32];
+        int  n = snprintf(buf, sizeof(buf), "%u", (unsigned)name->line);
+        if (n < 0) {
+            return QCC_ERR_IO;
+        }
+        const char *sp = qcc_pp_intern(pp, buf, (size_t)n);
+        if (sp == NULL) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        tok.kind         = QCC_PP_TOKEN_PP_NUMBER;
+        tok.spelling     = sp;
+        tok.spelling_len = (size_t)n;
+    } else { /* QCC_MACRO_BUILTIN_FILE */
+        const char *fname = (name->source != NULL) ? name->source->name : "";
+        size_t      flen  = strlen(fname);
+        /* Worst case: every byte escaped, plus two quotes. */
+        size_t      cap   = flen * 2u + 2u;
+        char       *buf   = (char *)malloc(cap);
+        if (buf == NULL) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        size_t j  = 0;
+        buf[j++]  = '"';
+        for (size_t i = 0; i < flen; ++i) {
+            char c = fname[i];
+            if (c == '"' || c == '\\') {
+                buf[j++] = '\\';
+            }
+            buf[j++] = c;
+        }
+        buf[j++] = '"';
+        const char *sp = qcc_pp_intern(pp, buf, j);
+        free(buf);
+        if (sp == NULL) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        tok.kind         = QCC_PP_TOKEN_STRING_LIT;
+        tok.spelling     = sp;
+        tok.spelling_len = j;
+    }
+
+    return push_one(pp, stream, name, tok);
+}
+
 /* Object-like expansion (§6.10.3 ¶9): see header. */
 static qcc_status expand_object(qcc_pp *pp, qcc_pp_stream *stream,
                                 const qcc_ptok *name, const qcc_macro *macro)
@@ -652,6 +741,15 @@ qcc_status qcc_pp_expand(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *name
         return QCC_ERR_INVALID_ARGUMENT;
     }
     *out_expanded = 0;
+
+    if (macro->builtin != QCC_MACRO_BUILTIN_NONE) {
+        qcc_status bst = expand_builtin(pp, stream, name, macro);
+        if (bst != QCC_OK) {
+            return bst;
+        }
+        *out_expanded = 1;
+        return QCC_OK;
+    }
 
     if (macro->is_function_like) {
         return expand_function(pp, stream, name, macro, out_expanded);

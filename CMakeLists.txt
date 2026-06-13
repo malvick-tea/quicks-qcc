@@ -45,6 +45,7 @@ add_library(qcc_core STATIC
     src/pp/internal/stream.c
     src/pp/internal/expand.c
     src/pp/internal/glue.c
+    src/pp/internal/builtin.c
     src/pp/internal/directive.c
 )
 

@@ -271,6 +271,7 @@ static qcc_macro *build_macro(qcc_pp *pp, const qcc_ptok *name, int func_like,
     m->name              = name->spelling;
     m->is_function_like  = func_like ? 1u : 0u;
     m->is_variadic       = variadic ? 1u : 0u;
+    m->builtin           = QCC_MACRO_BUILTIN_NONE; /* A user macro, not builtin. */
     m->param_count       = params->count;
     m->params            = NULL;
     m->replacement       = NULL;

@@ -30,6 +30,9 @@ front-to-back):
   (§6.10.3.1), Prosser substitution, and hide-set rescan.
 - `internal/glue` — the `#` (stringize, §6.10.3.2) and `##` (paste, §6.10.3.3)
   operators; paste re-lexes the concatenation with the real lexer.
+- `internal/builtin` — the predefined macros (§6.10.8): `__LINE__`/`__FILE__`
+  (tagged builtins, computed per use) and the fixed-value `__STDC__`,
+  `__STDC_VERSION__`, `__STDC_HOSTED__`, `__DATE__`, `__TIME__`.
 - `internal/directive` — directive recognition/dispatch: `#define` (object- and
   function-like, variadic), `#undef`, the null directive, and the replacement-
   list constraints (§6.10.3.2/.3). Conditionals, `#include`, and
@@ -41,10 +44,10 @@ front-to-back):
 token stream, executes `#define`/`#undef`, and expands object- and function-like
 macros — including `#`, `##`, variadic `__VA_ARGS__`, argument pre-expansion, and
 line-spanning invocations — with hide-set-based recursion control (self- and
-mutually-recursive macros terminate). Newlines are consumed, not emitted (phase-4
-output has none). Conditional inclusion, `#include`, and predefined macros are
-added through the remaining submodules; each lands with tests and this README
-updates with it.
+mutually-recursive macros terminate). The predefined macros of §6.10.8 are in
+scope from the first line. Newlines are consumed, not emitted (phase-4 output has
+none). Conditional inclusion and `#include` are added through the remaining
+submodules; each lands with tests and this README updates with it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

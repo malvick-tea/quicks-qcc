@@ -23,6 +23,7 @@
  */
 #include "pp/pp.h"
 
+#include "pp/internal/builtin.h"
 #include "pp/internal/directive.h"
 #include "pp/internal/expand.h"
 #include "pp/internal/hideset.h"
@@ -57,6 +58,16 @@ qcc_status qcc_pp_init(qcc_pp *pp, qcc_diag_sink *diags)
     }
     st = qcc_macro_table_init(pp->macros);
     if (st != QCC_OK) {
+        pp->macros = NULL;
+        qcc_intern_dispose(&pp->interner);
+        qcc_arena_dispose(&pp->arena);
+        return st;
+    }
+
+    /* Predefined macros (§6.10.8) are in scope from the first line. */
+    st = qcc_pp_install_builtins(pp);
+    if (st != QCC_OK) {
+        qcc_macro_table_dispose(pp->macros);
         pp->macros = NULL;
         qcc_intern_dispose(&pp->interner);
         qcc_arena_dispose(&pp->arena);

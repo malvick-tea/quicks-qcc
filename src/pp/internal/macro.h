@@ -35,6 +35,18 @@
 #include "status/status.h"
 
 /*
+ * Builtin macros whose replacement is computed at each use rather than stored
+ * (§6.10.8). The standard predefined macros with fixed values (__STDC__,
+ * __DATE__, …) are ordinary object-like macros installed at startup; only the
+ * position-dependent ones need a builtin tag.
+ */
+typedef enum qcc_macro_builtin {
+    QCC_MACRO_BUILTIN_NONE = 0,
+    QCC_MACRO_BUILTIN_LINE,   /* __LINE__ : the current line as a pp-number.     */
+    QCC_MACRO_BUILTIN_FILE    /* __FILE__ : the current file as a string literal.*/
+} qcc_macro_builtin;
+
+/*
  * One macro definition. All pointers (name, params[i], replacement, and each
  * replacement token's spelling) are arena/interner owned by the preprocessor
  * and outlive the table entry. A value-ish record: the table stores it by
@@ -44,6 +56,7 @@ typedef struct qcc_macro {
     const char       *name;               /* Interned macro name.               */
     unsigned          is_function_like : 1; /* `NAME(...)` vs plain `NAME`.      */
     unsigned          is_variadic : 1;    /* Parameter list ended with `...`.    */
+    qcc_macro_builtin builtin;            /* Non-NONE => computed at each use.   */
 
     const char      **params;             /* Interned parameter names, or NULL.  */
     size_t            param_count;        /* Number of named parameters.         */

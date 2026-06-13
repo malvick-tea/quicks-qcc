@@ -393,6 +393,37 @@ static void test_call_spanning_lines(void)
     cleanup(&pp, &d, &s, &out);
 }
 
+/* Predefined macros (§6.10.8): __LINE__, __FILE__, and the fixed-value ones. */
+static void test_predefined_macros(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+
+    /* __LINE__ on the third line expands to the pp-number 3. */
+    QTEST_CHECK_EQ_INT(run("\n\n__LINE__\n", &pp, &d, &s, &out), QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "count");
+    chk(&out, 0, QCC_PP_TOKEN_PP_NUMBER, "3");
+    cleanup(&pp, &d, &s, &out);
+
+    /* __FILE__ is the source name as a string literal. */
+    QTEST_CHECK_EQ_INT(run("__FILE__\n", &pp, &d, &s, &out), QCC_OK, "run2");
+    chk(&out, 0, QCC_PP_TOKEN_STRING_LIT, "\"t.c\"");
+    cleanup(&pp, &d, &s, &out);
+
+    /* Fixed-value macros. */
+    QTEST_CHECK_EQ_INT(run("__STDC__ __STDC_VERSION__ __STDC_HOSTED__\n",
+                           &pp, &d, &s, &out), QCC_OK, "run3");
+    chk(&out, 0, QCC_PP_TOKEN_PP_NUMBER, "1");
+    chk(&out, 1, QCC_PP_TOKEN_PP_NUMBER, "201112L");
+    chk(&out, 2, QCC_PP_TOKEN_PP_NUMBER, "0");
+    cleanup(&pp, &d, &s, &out);
+
+    /* __DATE__ and __TIME__ are string literals (value depends on the clock). */
+    QTEST_CHECK_EQ_INT(run("__DATE__ __TIME__\n", &pp, &d, &s, &out), QCC_OK, "run4");
+    QTEST_CHECK_EQ_INT(out.items[0].kind, QCC_PP_TOKEN_STRING_LIT, "date kind");
+    QTEST_CHECK_EQ_INT(out.items[1].kind, QCC_PP_TOKEN_STRING_LIT, "time kind");
+    cleanup(&pp, &d, &s, &out);
+}
+
 /* Argument validation and NULL-safety. */
 static void test_invalid_args(void)
 {
@@ -436,6 +467,7 @@ int main(void)
     test_function_recursion();
     test_arg_count();
     test_call_spanning_lines();
+    test_predefined_macros();
     test_invalid_args();
     return qtest_report("pp");
 }
