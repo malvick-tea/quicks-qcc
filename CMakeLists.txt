@@ -42,6 +42,9 @@ add_library(qcc_core STATIC
     src/pp/ptok_list.c
     src/pp/internal/hideset.c
     src/pp/internal/macro.c
+    src/pp/internal/stream.c
+    src/pp/internal/expand.c
+    src/pp/internal/directive.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include

@@ -19,15 +19,27 @@ front-to-back):
 - `internal/hideset` — immutable hide sets of interned macro names (§6.10.3.4):
   the membership/union/intersection algebra that stops self- and mutually-
   recursive macro expansion.
-- *(landing next)* `internal/macro`, `internal/stream`, `internal/expand`,
-  `internal/cond`, `internal/ceval`, `internal/directive`.
-- `pp.c` — the driver and the lexer→`qcc_ptok` materialization boundary;
-  `ptok_list.c` — the token list.
+- `internal/macro` — the macro table (object/function-like records; the
+  identical-redefinition test of §6.10.3 ¶2).
+- `internal/stream` — the token-input stack: lexes a source, materializes the
+  lexer's span-backed tokens into `qcc_ptok` (the one place that happens),
+  pushes macro replacements for rescanning and (later) `#include`d files, and
+  flags whether a token came from a macro expansion.
+- `internal/expand` — macro expansion (object-like now; function-like, `#`,
+  `##` next), using hide sets as the recursion guard.
+- `internal/directive` — directive recognition/dispatch: `#define` (object- and
+  function-like, variadic), `#undef`, the null directive, and the replacement-
+  list constraints (§6.10.3.2/.3). Conditionals, `#include`, and
+  `#line`/`#error`/`#pragma` land in later steps.
+- *(landing next)* `internal/cond`, `internal/ceval`.
+- `pp.c` — the line-oriented driver; `ptok_list.c` — the token list.
 
-**Current behavior:** `qcc_pp_run` materializes the phase-1-3 token stream into
-`qcc_ptok` values (interning spellings, recording provenance, empty hide sets).
-Directive execution and macro expansion are added through the internal
-submodules; each lands with tests and this README is updated in the same commit.
+**Current behavior:** `qcc_pp_run` runs the phase-4 loop: it materializes the
+token stream, executes `#define`/`#undef`, and expands object-like macros with
+hide-set-based recursion control (self- and mutually-recursive macros terminate).
+Newlines are consumed, not emitted (phase-4 output has none). Function-like
+expansion, `#`/`##`, conditionals, and `#include` are added through the
+remaining submodules; each lands with tests and this README updates with it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

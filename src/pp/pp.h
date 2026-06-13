@@ -43,9 +43,11 @@
 #include "status/status.h"
 #include "token/token.h"
 
-/* The hide set is a preprocessor internal (pp/internal/hideset.h); callers of
-   this header only ever hold an opaque const pointer to one. */
+/* The hide set and macro table are preprocessor internals
+   (pp/internal/hideset.h, pp/internal/macro.h); callers of this header only
+   hold opaque pointers to them. */
 typedef struct qcc_hideset qcc_hideset;
+struct qcc_macro_table;
 
 /*
  * A materialized preprocessing token. A value: copy it freely. Unlike the
@@ -113,6 +115,7 @@ typedef struct qcc_pp {
     qcc_arena      arena;     /* Backs synthesized spellings, macros, hide sets. */
     qcc_intern     interner;  /* Interns every token spelling (over `arena`).    */
     qcc_diag_sink *diags;     /* Borrowed; must outlive the preprocessor.        */
+    struct qcc_macro_table *macros; /* Macro definitions in force (arena-owned). */
 } qcc_pp;
 
 /*
