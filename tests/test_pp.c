@@ -424,6 +424,132 @@ static void test_predefined_macros(void)
     cleanup(&pp, &d, &s, &out);
 }
 
+/* #if/#else/#endif select the taken group; the other is dropped. */
+static void test_if_else(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#if 1\na\n#else\nb\n#endif\n", &pp, &d, &s, &out),
+                       QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "a EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "a");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "no errors");
+    cleanup(&pp, &d, &s, &out);
+
+    QTEST_CHECK_EQ_INT(run("#if 0\na\n#else\nb\n#endif\n", &pp, &d, &s, &out),
+                       QCC_OK, "run2");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "b EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "b");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* #elif chains select the first true group. */
+static void test_elif(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#if 0\na\n#elif 2 > 1\nb\n#elif 1\nc\n#else\nd\n#endif\n",
+                           &pp, &d, &s, &out), QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "b EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "b");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* The controlling expression honors C operator precedence and arithmetic. */
+static void test_if_expression(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    struct { const char *expr; int taken; } cases[] = {
+        { "2 + 3 * 4 == 14", 1 },
+        { "(1 << 4) == 16", 1 },
+        { "7 % 3 == 1", 1 },
+        { "1 ? 0 : 1", 0 },
+        { "0x10 == 16 && 010 == 8", 1 },
+        { "!0 && ~0 == -1", 1 },
+        { "5 > 3 ? 2 : 9", 1 },
+        { "1 || (1/0)", 1 },   /* short-circuit avoids the division */
+        { "'A' == 65", 1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char src[64];
+        snprintf(src, sizeof(src), "#if %s\nx\n#endif\n", cases[i].expr);
+        QTEST_CHECK_EQ_INT(run(src, &pp, &d, &s, &out), QCC_OK, "run");
+        QTEST_CHECK_EQ_INT((int)out.count, cases[i].taken ? 2 : 1, cases[i].expr);
+        QTEST_CHECK_EQ_UINT(errors(&d), 0, "no eval errors");
+        cleanup(&pp, &d, &s, &out);
+    }
+}
+
+/* defined operator and macro expansion in the controlling expression. */
+static void test_if_defined(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#define FEATURE 1\n#if defined(FEATURE) && FEATURE\n"
+                           "on\n#endif\n", &pp, &d, &s, &out), QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "on EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "on");
+    cleanup(&pp, &d, &s, &out);
+
+    /* An undefined name is 0 after expansion; defined X without parens works. */
+    QTEST_CHECK_EQ_INT(run("#if defined NOPE\nx\n#else\ny\n#endif\n",
+                           &pp, &d, &s, &out), QCC_OK, "run2");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "y");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* #ifdef / #ifndef test macro existence. */
+static void test_ifdef(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#define M\n#ifdef M\nyes\n#endif\n#ifndef M\nno\n#endif\n",
+                           &pp, &d, &s, &out), QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(out.count, 2, "yes EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "yes");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* Nested conditionals: an inner #if inside a skipped group stays skipped, and
+   directives in skipped groups are not executed. */
+static void test_nested_and_skipped(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#if 0\n#define SHOULD_NOT 1\n#if 1\nx\n#endif\n#endif\n"
+                           "SHOULD_NOT\n", &pp, &d, &s, &out), QCC_OK, "run");
+    /* The #define was skipped, so SHOULD_NOT stays an identifier; x is skipped. */
+    QTEST_CHECK_EQ_UINT(out.count, 2, "SHOULD_NOT EOF");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "SHOULD_NOT");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "no errors");
+    cleanup(&pp, &d, &s, &out);
+
+    /* A taken outer with a nested selection. */
+    QTEST_CHECK_EQ_INT(run("#if 1\n#if 0\na\n#else\nb\n#endif\n#endif\n",
+                           &pp, &d, &s, &out), QCC_OK, "run2");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "b");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* Structural errors: unterminated #if, stray #endif/#else. */
+static void test_conditional_errors(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+
+    QTEST_CHECK_EQ_INT(run("#if 1\nx\n", &pp, &d, &s, &out), QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "unterminated #if");
+    cleanup(&pp, &d, &s, &out);
+
+    QTEST_CHECK_EQ_INT(run("#endif\n", &pp, &d, &s, &out), QCC_OK, "run2");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "#endif without #if");
+    cleanup(&pp, &d, &s, &out);
+
+    QTEST_CHECK_EQ_INT(run("#if 1\n#else\n#else\n#endif\n", &pp, &d, &s, &out),
+                       QCC_OK, "run3");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "#else after #else");
+    cleanup(&pp, &d, &s, &out);
+
+    /* A floating constant in #if is rejected. */
+    QTEST_CHECK_EQ_INT(run("#if 1.5\nx\n#endif\n", &pp, &d, &s, &out), QCC_OK, "run4");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "float in #if");
+    cleanup(&pp, &d, &s, &out);
+}
+
 /* Argument validation and NULL-safety. */
 static void test_invalid_args(void)
 {
@@ -468,6 +594,13 @@ int main(void)
     test_arg_count();
     test_call_spanning_lines();
     test_predefined_macros();
+    test_if_else();
+    test_elif();
+    test_if_expression();
+    test_if_defined();
+    test_ifdef();
+    test_nested_and_skipped();
+    test_conditional_errors();
     test_invalid_args();
     return qtest_report("pp");
 }

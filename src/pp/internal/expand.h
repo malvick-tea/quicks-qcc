@@ -36,4 +36,13 @@
 qcc_status qcc_pp_expand(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *name,
                          const qcc_macro *macro, int *out_expanded);
 
+/*
+ * Macro-expand a complete token sequence to completion, appending the result to
+ * `out`. Used to expand the controlling expression of #if/#elif (§6.10.1 ¶4)
+ * and macro arguments (§6.10.3.1). `out` must be an initialized list. Returns
+ * QCC_OK or a hard fault.
+ */
+qcc_status qcc_pp_expand_all(qcc_pp *pp, const qcc_ptok *toks, size_t count,
+                             qcc_ptok_list *out);
+
 #endif /* QCC_PP_INTERNAL_EXPAND_H */

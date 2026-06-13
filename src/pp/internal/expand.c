@@ -733,6 +733,15 @@ static qcc_status expand_function(qcc_pp *pp, qcc_pp_stream *stream,
     return QCC_OK;
 }
 
+qcc_status qcc_pp_expand_all(qcc_pp *pp, const qcc_ptok *toks, size_t count,
+                             qcc_ptok_list *out)
+{
+    if (pp == NULL || out == NULL || (toks == NULL && count != 0)) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    return expand_token_list(pp, toks, count, out);
+}
+
 qcc_status qcc_pp_expand(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *name,
                          const qcc_macro *macro, int *out_expanded)
 {

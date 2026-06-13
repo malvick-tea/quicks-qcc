@@ -24,6 +24,7 @@
 #include "pp/pp.h"
 
 #include "pp/internal/builtin.h"
+#include "pp/internal/cond.h"
 #include "pp/internal/directive.h"
 #include "pp/internal/expand.h"
 #include "pp/internal/hideset.h"
@@ -64,9 +65,23 @@ qcc_status qcc_pp_init(qcc_pp *pp, qcc_diag_sink *diags)
         return st;
     }
 
+    /* The conditional-inclusion stack starts empty (its array grows lazily). */
+    pp->conds = (qcc_cond_stack *)qcc_arena_alloc(&pp->arena, sizeof(*pp->conds),
+                                                  _Alignof(qcc_cond_stack));
+    if (pp->conds == NULL) {
+        qcc_macro_table_dispose(pp->macros);
+        pp->macros = NULL;
+        qcc_intern_dispose(&pp->interner);
+        qcc_arena_dispose(&pp->arena);
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    qcc_cond_stack_init(pp->conds);
+
     /* Predefined macros (§6.10.8) are in scope from the first line. */
     st = qcc_pp_install_builtins(pp);
     if (st != QCC_OK) {
+        qcc_cond_stack_dispose(pp->conds);
+        pp->conds = NULL;
         qcc_macro_table_dispose(pp->macros);
         pp->macros = NULL;
         qcc_intern_dispose(&pp->interner);
@@ -80,6 +95,10 @@ void qcc_pp_dispose(qcc_pp *pp)
 {
     if (pp == NULL) {
         return;
+    }
+    if (pp->conds != NULL) {
+        qcc_cond_stack_dispose(pp->conds); /* Frees the frame array. */
+        pp->conds = NULL;
     }
     if (pp->macros != NULL) {
         qcc_macro_table_dispose(pp->macros); /* Frees the bucket array. */
@@ -113,9 +132,11 @@ static int is_directive_intro(const qcc_ptok *tok, int from_expansion)
 qcc_status qcc_pp_run(qcc_pp *pp, const qcc_source *source, qcc_ptok_list *out)
 {
     if (pp == NULL || source == NULL || out == NULL || pp->diags == NULL ||
-        pp->macros == NULL) {
+        pp->macros == NULL || pp->conds == NULL) {
         return QCC_ERR_INVALID_ARGUMENT;
     }
+
+    qcc_cond_stack_clear(pp->conds); /* Fresh conditional state for this unit. */
 
     qcc_pp_stream stream;
     qcc_status    st = qcc_pp_stream_init(&stream, pp, source);
@@ -132,18 +153,32 @@ qcc_status qcc_pp_run(qcc_pp *pp, const qcc_source *source, qcc_ptok_list *out)
         }
 
         if (tok.kind == QCC_PP_TOKEN_EOF) {
+            /* A conditional left open at end of file is an error (§6.10.1). */
+            if (qcc_cond_depth(pp->conds) != 0) {
+                qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, tok.source, tok.offset, 1,
+                              "unterminated conditional directive (missing "
+                              "#endif)");
+            }
             st = qcc_ptok_list_push(out, &tok); /* Terminate the output. */
             break;
         }
-        if (tok.kind == QCC_PP_TOKEN_NEWLINE) {
-            continue; /* Line structure is not part of the phase-4 token output. */
-        }
 
+        /* Directives are recognized in both emitting and skipped regions: the
+           conditional directives must be tracked even while skipping. */
         if (is_directive_intro(&tok, from_expansion)) {
             st = qcc_pp_directive(pp, &stream, &tok);
             if (st != QCC_OK) {
                 break;
             }
+            continue;
+        }
+
+        if (tok.kind == QCC_PP_TOKEN_NEWLINE) {
+            continue; /* Line structure is not part of the phase-4 token output. */
+        }
+
+        /* Inside a non-taken conditional group: drop the token unexpanded. */
+        if (!qcc_cond_emitting(pp->conds)) {
             continue;
         }
 

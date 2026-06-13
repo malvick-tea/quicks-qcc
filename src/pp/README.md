@@ -37,7 +37,12 @@ front-to-back):
   function-like, variadic), `#undef`, the null directive, and the replacement-
   list constraints (§6.10.3.2/.3). Conditionals, `#include`, and
   `#line`/`#error`/`#pragma` land in later steps.
-- *(landing next)* `internal/cond`, `internal/ceval`.
+- `internal/cond` — the conditional-inclusion stack (§6.10.1): tracks the nest
+  of #if/#ifdef/#ifndef/#elif/#else/#endif groups and answers "are we emitting?".
+- `internal/ceval` — the #if/#elif controlling expression: `defined`
+  substitution, macro expansion, identifier→0, then an intmax_t/uintmax_t
+  recursive-descent evaluator with C precedence, the usual arithmetic
+  conversions, and short-circuit &&/||/?:.
 - `pp.c` — the line-oriented driver; `ptok_list.c` — the token list.
 
 **Current behavior:** `qcc_pp_run` runs the phase-4 loop: it materializes the
@@ -45,9 +50,13 @@ token stream, executes `#define`/`#undef`, and expands object- and function-like
 macros — including `#`, `##`, variadic `__VA_ARGS__`, argument pre-expansion, and
 line-spanning invocations — with hide-set-based recursion control (self- and
 mutually-recursive macros terminate). The predefined macros of §6.10.8 are in
-scope from the first line. Newlines are consumed, not emitted (phase-4 output has
-none). Conditional inclusion and `#include` are added through the remaining
-submodules; each lands with tests and this README updates with it.
+scope from the first line. Conditional inclusion (`#if`/`#ifdef`/`#ifndef`/
+`#elif`/`#else`/`#endif`, with a full integer-constant-expression evaluator and
+the `defined` operator) selects which groups are processed; skipped groups are
+tracked for nesting but their directives are not executed (§6.10.1 ¶6). Newlines
+are consumed, not emitted (phase-4 output has none). `#include` and the CLI `-E`
+output are the remaining step; each lands with tests and this README updates with
+it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

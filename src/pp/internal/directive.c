@@ -16,6 +16,8 @@
 #include <string.h>
 
 #include "diag/diag.h"
+#include "pp/internal/ceval.h"
+#include "pp/internal/cond.h"
 #include "pp/internal/macro.h"
 
 /* A growable vector of interned parameter-name pointers (no fixed limit). */
@@ -404,6 +406,158 @@ static qcc_status do_undef(qcc_pp *pp, qcc_pp_stream *stream)
     return QCC_OK;
 }
 
+/*
+ * Read the next token; if it is not the end of the line, optionally warn about
+ * the extra tokens and then skip to the line end. Used by directives that take
+ * no further tokens (#else, #endif, #ifdef name, …).
+ */
+static qcc_status expect_line_end(qcc_pp *pp, qcc_pp_stream *stream, int warn,
+                                  const char *directive)
+{
+    qcc_ptok t;
+    int      fe;
+    qcc_status st = qcc_pp_stream_next(stream, &t, &fe);
+    if (st != QCC_OK) {
+        return st;
+    }
+    if (is_line_end(&t)) {
+        return QCC_OK;
+    }
+    if (warn) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_WARNING, t.source, t.offset,
+                      tok_span(&t), "extra tokens at end of #%s directive",
+                      directive);
+    }
+    return skip_to_line_end(stream);
+}
+
+/* #if: evaluate the controlling expression (only when the enclosing region is
+   emitting) and open a conditional (§6.10.1). */
+static qcc_status do_if(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    int        emitting = qcc_cond_emitting(pp->conds);
+    int        cond     = 0;
+    qcc_status st       = QCC_OK;
+
+    if (emitting) {
+        qcc_ptok_list line;
+        qcc_ptok_list_init(&line);
+        st = collect_replacement(stream, &line); /* Tokens up to the newline. */
+        if (st == QCC_OK) {
+            st = qcc_pp_eval_condition(pp, line.items, line.count, &cond);
+        }
+        qcc_ptok_list_dispose(&line);
+    } else {
+        st = skip_to_line_end(stream); /* Skipped group: do not evaluate. */
+    }
+    if (st != QCC_OK) {
+        return st;
+    }
+    return qcc_cond_push(pp->conds, emitting, cond);
+}
+
+/* #ifdef / #ifndef: open a conditional on whether a macro is defined. */
+static qcc_status do_ifdef(qcc_pp *pp, qcc_pp_stream *stream, int negate)
+{
+    int      emitting = qcc_cond_emitting(pp->conds);
+    qcc_ptok name;
+    int      fe;
+    qcc_status st = qcc_pp_stream_next(stream, &name, &fe);
+    if (st != QCC_OK) {
+        return st;
+    }
+
+    int cond = 0;
+    if (name.kind != QCC_PP_TOKEN_IDENTIFIER) {
+        if (emitting) {
+            qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
+                          tok_span(&name), "macro name must be an identifier");
+        }
+        if (!is_line_end(&name)) {
+            st = skip_to_line_end(stream);
+        }
+    } else {
+        int defined = (qcc_macro_lookup(pp->macros, name.spelling) != NULL);
+        cond = negate ? !defined : defined;
+        st = expect_line_end(pp, stream, emitting,
+                             negate ? "ifndef" : "ifdef");
+    }
+    if (st != QCC_OK) {
+        return st;
+    }
+    return qcc_cond_push(pp->conds, emitting, cond);
+}
+
+/* #elif: select this group if no earlier one was taken and the expression is
+   nonzero (§6.10.1 ¶2). */
+static qcc_status do_elif(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    qcc_cond *frame = qcc_cond_top(pp->conds);
+    if (frame == NULL) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, NULL, 0, 1, "#elif without #if");
+        return skip_to_line_end(stream);
+    }
+    if (frame->seen_else) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, NULL, 0, 1, "#elif after #else");
+        frame->active = 0;
+        return skip_to_line_end(stream);
+    }
+
+    if (frame->outer_active && !frame->taken) {
+        qcc_ptok_list line;
+        qcc_ptok_list_init(&line);
+        qcc_status st = collect_replacement(stream, &line);
+        int cond = 0;
+        if (st == QCC_OK) {
+            st = qcc_pp_eval_condition(pp, line.items, line.count, &cond);
+        }
+        qcc_ptok_list_dispose(&line);
+        if (st != QCC_OK) {
+            return st;
+        }
+        frame->active = cond ? 1 : 0;
+        if (frame->active) {
+            frame->taken = 1;
+        }
+        return QCC_OK;
+    }
+
+    frame->active = 0; /* Outer inactive or already taken: skip without eval. */
+    return skip_to_line_end(stream);
+}
+
+/* #else: select this group if none earlier was taken (§6.10.1 ¶2). */
+static qcc_status do_else(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    qcc_cond *frame = qcc_cond_top(pp->conds);
+    if (frame == NULL) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, NULL, 0, 1, "#else without #if");
+        return skip_to_line_end(stream);
+    }
+    if (frame->seen_else) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, NULL, 0, 1, "#else after #else");
+        return skip_to_line_end(stream);
+    }
+    frame->seen_else = 1;
+    if (frame->outer_active && !frame->taken) {
+        frame->active = 1;
+        frame->taken  = 1;
+    } else {
+        frame->active = 0;
+    }
+    return expect_line_end(pp, stream, frame->outer_active, "else");
+}
+
+/* #endif: close the innermost conditional (§6.10.1 ¶2). */
+static qcc_status do_endif(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    int had = qcc_cond_pop(pp->conds);
+    if (!had) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, NULL, 0, 1, "#endif without #if");
+    }
+    return expect_line_end(pp, stream, had, "endif");
+}
+
 /* Public interface. */
 
 qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *hash)
@@ -425,20 +579,51 @@ qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *h
     }
 
     if (name.kind == QCC_PP_TOKEN_IDENTIFIER) {
+        /* Conditional-inclusion directives are processed in both emitting and
+           skipped regions, because the nesting must be tracked while skipping
+           (§6.10.1 ¶6). */
+        if (strcmp(name.spelling, "if") == 0) {
+            return do_if(pp, stream);
+        }
+        if (strcmp(name.spelling, "ifdef") == 0) {
+            return do_ifdef(pp, stream, 0);
+        }
+        if (strcmp(name.spelling, "ifndef") == 0) {
+            return do_ifdef(pp, stream, 1);
+        }
+        if (strcmp(name.spelling, "elif") == 0) {
+            return do_elif(pp, stream);
+        }
+        if (strcmp(name.spelling, "else") == 0) {
+            return do_else(pp, stream);
+        }
+        if (strcmp(name.spelling, "endif") == 0) {
+            return do_endif(pp, stream);
+        }
+
+        /* All other directives are inert inside a skipped group: only their
+           presence is noted, never executed or diagnosed (§6.10.1 ¶6). */
+        if (!qcc_cond_emitting(pp->conds)) {
+            return skip_to_line_end(stream);
+        }
+
         if (strcmp(name.spelling, "define") == 0) {
             return do_define(pp, stream);
         }
         if (strcmp(name.spelling, "undef") == 0) {
             return do_undef(pp, stream);
         }
-        /* Recognized directives not yet implemented (conditionals, include,
-           line/error/pragma) land in later steps; until then, diagnose. */
+        /* #include and #line/#error/#pragma land in the next step; diagnose for
+           now so an unknown directive is never silently accepted. */
         qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
                       tok_span(&name),
                       "unsupported preprocessing directive '#%s'", name.spelling);
         return skip_to_line_end(stream);
     }
 
+    if (!qcc_cond_emitting(pp->conds)) {
+        return skip_to_line_end(stream);
+    }
     qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
                   tok_span(&name), "invalid preprocessing directive");
     return skip_to_line_end(stream);
