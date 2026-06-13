@@ -49,6 +49,7 @@ add_library(qcc_core STATIC
     src/pp/internal/cond.c
     src/pp/internal/ceval.c
     src/pp/internal/directive.c
+    src/pp/internal/incl.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include

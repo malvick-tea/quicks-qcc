@@ -123,4 +123,41 @@ qcc_status qcc_pp_stream_next(qcc_pp_stream *stream, qcc_ptok *out,
 qcc_status qcc_pp_stream_push_tokens(qcc_pp_stream *stream, const qcc_ptok *toks,
                                      size_t count);
 
+/*
+ * Push `source` as a new top input lexed from its first byte — the mechanism
+ * behind #include (§6.10.2). `source` must outlive the input (the include
+ * resolver owns it). next() resumes the file below this one once the included
+ * file reaches EOF (the included EOF is swallowed, not emitted). Returns QCC_OK
+ * or QCC_ERR_INVALID_ARGUMENT / QCC_ERR_OUT_OF_MEMORY.
+ */
+qcc_status qcc_pp_stream_push_source(qcc_pp_stream *stream,
+                                     const qcc_source *source);
+
+/*
+ * The source of the topmost *file* (lexer) input, skipping any macro-rescan
+ * inputs above it — i.e. the file the next file-level token will come from.
+ * Used by #include to derive the includer's directory (§6.10.2 ¶3). Returns
+ * NULL only when no file input remains (the stream is exhausted).
+ */
+const qcc_source *qcc_pp_stream_current_source(const qcc_pp_stream *stream);
+
+/*
+ * The number of file (lexer) inputs currently on the stack — the live #include
+ * nesting depth, used to enforce QCC_INCL_MAX_DEPTH (§5.2.4.1; ADR-0015).
+ * Macro-rescan inputs are not counted.
+ */
+size_t qcc_pp_stream_lexer_depth(const qcc_pp_stream *stream);
+
+/*
+ * Like qcc_pp_stream_next, but read the next token with the active file lexer
+ * switched into header-name mode (§6.4.7) for exactly this one read, so a
+ * leading '<' or '"' is lexed as a header-name token rather than punctuators or
+ * a string. The directive layer calls this immediately after "#include". When
+ * the top input is not a live file lexer (a pushback or a macro-rescan input is
+ * on top — not the case for a real #include line), it degrades to a normal
+ * next(). Same return contract as qcc_pp_stream_next.
+ */
+qcc_status qcc_pp_stream_next_header(qcc_pp_stream *stream, qcc_ptok *out,
+                                     int *from_expansion);
+
 #endif /* QCC_PP_INTERNAL_STREAM_H */

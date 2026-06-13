@@ -28,6 +28,7 @@
 #include "pp/internal/directive.h"
 #include "pp/internal/expand.h"
 #include "pp/internal/hideset.h"
+#include "pp/internal/incl.h"
 #include "pp/internal/macro.h"
 #include "pp/internal/stream.h"
 
@@ -39,8 +40,10 @@ qcc_status qcc_pp_init(qcc_pp *pp, qcc_diag_sink *diags)
         return QCC_ERR_INVALID_ARGUMENT;
     }
     qcc_arena_init(&pp->arena, 0);
-    pp->diags  = diags;
-    pp->macros = NULL;
+    pp->diags    = diags;
+    pp->macros   = NULL;
+    pp->conds    = NULL;
+    pp->includes = NULL;
 
     qcc_status st = qcc_intern_init(&pp->interner, &pp->arena);
     if (st != QCC_OK) {
@@ -88,6 +91,22 @@ qcc_status qcc_pp_init(qcc_pp *pp, qcc_diag_sink *diags)
         qcc_arena_dispose(&pp->arena);
         return st;
     }
+
+    /* The #include resolver: its struct is arena-owned (freed with the arena);
+       its search-path vectors and loaded sources are heap-owned and released by
+       qcc_incl_dispose. Empty until the caller adds search dirs (§6.10.2). */
+    pp->includes = (qcc_incl *)qcc_arena_alloc(&pp->arena, sizeof(*pp->includes),
+                                               _Alignof(qcc_incl));
+    if (pp->includes == NULL) {
+        qcc_cond_stack_dispose(pp->conds);
+        pp->conds = NULL;
+        qcc_macro_table_dispose(pp->macros);
+        pp->macros = NULL;
+        qcc_intern_dispose(&pp->interner);
+        qcc_arena_dispose(&pp->arena);
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    qcc_incl_init(pp->includes, &pp->arena);
     return QCC_OK;
 }
 
@@ -95,6 +114,10 @@ void qcc_pp_dispose(qcc_pp *pp)
 {
     if (pp == NULL) {
         return;
+    }
+    if (pp->includes != NULL) {
+        qcc_incl_dispose(pp->includes); /* Disposes every included source. */
+        pp->includes = NULL;
     }
     if (pp->conds != NULL) {
         qcc_cond_stack_dispose(pp->conds); /* Frees the frame array. */
@@ -117,6 +140,22 @@ const char *qcc_pp_intern(qcc_pp *pp, const char *bytes, size_t length)
     return qcc_intern_bytes(&pp->interner, bytes, length);
 }
 
+qcc_status qcc_pp_add_include_dir(qcc_pp *pp, const char *dir)
+{
+    if (pp == NULL || pp->includes == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    return qcc_incl_add_angle_dir(pp->includes, dir);
+}
+
+qcc_status qcc_pp_add_quote_include_dir(qcc_pp *pp, const char *dir)
+{
+    if (pp == NULL || pp->includes == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    return qcc_incl_add_quote_dir(pp->includes, dir);
+}
+
 /*
  * Is this token a directive introducer? Only a '#' punctuator that starts a
  * logical line and came directly from a file (not a macro expansion) — exactly
@@ -132,7 +171,7 @@ static int is_directive_intro(const qcc_ptok *tok, int from_expansion)
 qcc_status qcc_pp_run(qcc_pp *pp, const qcc_source *source, qcc_ptok_list *out)
 {
     if (pp == NULL || source == NULL || out == NULL || pp->diags == NULL ||
-        pp->macros == NULL || pp->conds == NULL) {
+        pp->macros == NULL || pp->conds == NULL || pp->includes == NULL) {
         return QCC_ERR_INVALID_ARGUMENT;
     }
 

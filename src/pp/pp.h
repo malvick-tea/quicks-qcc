@@ -43,12 +43,13 @@
 #include "status/status.h"
 #include "token/token.h"
 
-/* The hide set, macro table, and conditional stack are preprocessor internals
-   (pp/internal/{hideset,macro,cond}.h); callers of this header only hold opaque
-   pointers to them. */
+/* The hide set, macro table, conditional stack, and include resolver are
+   preprocessor internals (pp/internal/{hideset,macro,cond,incl}.h); callers of
+   this header only hold opaque pointers to them. */
 typedef struct qcc_hideset qcc_hideset;
 struct qcc_macro_table;
 struct qcc_cond_stack;
+struct qcc_incl;
 
 /*
  * A materialized preprocessing token. A value: copy it freely. Unlike the
@@ -118,6 +119,7 @@ typedef struct qcc_pp {
     qcc_diag_sink *diags;     /* Borrowed; must outlive the preprocessor.        */
     struct qcc_macro_table *macros; /* Macro definitions in force (arena-owned). */
     struct qcc_cond_stack  *conds;  /* Open #if/#ifdef conditionals (arena-owned)*/
+    struct qcc_incl        *includes; /* #include search paths + owned sources.   */
 } qcc_pp;
 
 /*
@@ -127,9 +129,25 @@ typedef struct qcc_pp {
  */
 qcc_status qcc_pp_init(qcc_pp *pp, qcc_diag_sink *diags);
 
-/* Release everything the preprocessor owns (arena, interner). After this, any
-   qcc_ptok it produced is invalid. Idempotent and NULL-safe. */
+/* Release everything the preprocessor owns (arena, interner, included sources).
+   After this, any qcc_ptok it produced is invalid. Idempotent and NULL-safe. */
 void qcc_pp_dispose(qcc_pp *pp);
+
+/*
+ * Add a directory to the #include search path. `dir` is copied; "" means the
+ * current directory. Call before qcc_pp_run. Returns QCC_OK or
+ * QCC_ERR_INVALID_ARGUMENT / QCC_ERR_OUT_OF_MEMORY.
+ *
+ *   qcc_pp_add_include_dir       : an angle/system dir (a -I path) — searched by
+ *                                  `#include <...>` and by the `"..."` fallback.
+ *   qcc_pp_add_quote_include_dir : a quote-only dir (a -iquote path) — searched
+ *                                  by `#include "..."`, before the angle dirs.
+ *
+ * The directory of the including file is always searched first for the `"..."`
+ * form, with no registration needed (§6.10.2 ¶3).
+ */
+qcc_status qcc_pp_add_include_dir(qcc_pp *pp, const char *dir);
+qcc_status qcc_pp_add_quote_include_dir(qcc_pp *pp, const char *dir);
 
 /*
  * Intern a byte span through the preprocessor's interner and return the stable

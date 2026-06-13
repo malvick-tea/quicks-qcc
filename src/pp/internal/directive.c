@@ -1,14 +1,17 @@
 /*
  * qcc — preprocessor internals: directive parsing and dispatch (implementation).
  *
- * See directive.h for the contract. This step implements #define (object- and
- * function-like, including variadic) and #undef, plus the null directive
- * (§6.10.7). Unimplemented directives are diagnosed and skipped; they land in
- * later steps (conditionals, #include, #line/#error/#pragma).
+ * See directive.h for the contract. This implements #define (object- and
+ * function-like, including variadic) and #undef plus the null directive
+ * (§6.10.7), the conditional-inclusion directives (§6.10.1), and #include
+ * (§6.10.2) in all three forms (<...>, "...", and the macro-expanded "computed
+ * include"). The remaining line-control/diagnostic directives (#line, #error,
+ * #pragma) are diagnosed-and-skipped until they land.
  *
  * Spec anchors: §6.10.3 (macro definition), §6.10.3 ¶5 (__VA_ARGS__ / reserved
  * parameter rules), §6.10.3.2 ¶1 (# must precede a parameter), §6.10.3.3 ¶1
- * (## not at either end of a replacement list), §6.10.3.5 (#undef).
+ * (## not at either end of a replacement list), §6.10.3.5 (#undef), §6.10.2
+ * (#include and the search path; resolution policy in ADR-0015).
  */
 #include "pp/internal/directive.h"
 
@@ -18,6 +21,8 @@
 #include "diag/diag.h"
 #include "pp/internal/ceval.h"
 #include "pp/internal/cond.h"
+#include "pp/internal/expand.h"
+#include "pp/internal/incl.h"
 #include "pp/internal/macro.h"
 
 /* A growable vector of interned parameter-name pointers (no fixed limit). */
@@ -558,6 +563,169 @@ static qcc_status do_endif(qcc_pp *pp, qcc_pp_stream *stream)
     return expect_line_end(pp, stream, had, "endif");
 }
 
+/*
+ * Reconstruct a header name from the macro-expanded tokens of a computed
+ * #include (§6.10.2 ¶4). Two shapes are accepted after expansion:
+ *
+ *   "q-chars"          a single string literal -> the quote form; the name is
+ *                      the bytes between the quotes.
+ *   < t1 t2 ... tn >   a '<' … '>' bracketing -> the angle form; the name is the
+ *                      inner tokens' spellings, with a single space reinserted
+ *                      wherever the source separated two of them.
+ *
+ * On success returns QCC_OK with *out_have = 1 and the name pieces filled. A
+ * sequence that is neither shape is a constraint violation: a diagnostic is
+ * emitted and QCC_OK is returned with *out_have = 0. QCC_ERR_OUT_OF_MEMORY is
+ * returned only on a hard allocation failure. The returned name lives in the
+ * preprocessor arena or the interner, so it outlives the expanded-token list.
+ */
+static qcc_status reconstruct_header(qcc_pp *pp, const qcc_ptok_list *toks,
+                                     const qcc_source *loc_src, size_t loc_off,
+                                     const char **out_name, size_t *out_len,
+                                     int *out_angle, int *out_have)
+{
+    *out_have = 0;
+    size_t n  = toks->count;
+
+    /* A single string literal is the quote form. */
+    if (n == 1 && toks->items[0].kind == QCC_PP_TOKEN_STRING_LIT &&
+        toks->items[0].spelling_len >= 2 && toks->items[0].spelling[0] == '"') {
+        const qcc_ptok *s = &toks->items[0];
+        *out_name  = s->spelling + 1;
+        *out_len   = s->spelling_len - 2;
+        *out_angle = 0;
+        *out_have  = 1;
+        return QCC_OK;
+    }
+
+    /* A '<' … '>' bracketing is the angle form. */
+    if (n >= 2 && is_punct(&toks->items[0], QCC_PUNCT_LT) &&
+        is_punct(&toks->items[n - 1], QCC_PUNCT_GT)) {
+        size_t len = 0;
+        for (size_t i = 1; i + 1 < n; ++i) {
+            if (i > 1 && toks->items[i].leading_space) {
+                len += 1;
+            }
+            len += toks->items[i].spelling_len;
+        }
+        char *buf = (char *)qcc_arena_alloc(&pp->arena, len + 1, 1);
+        if (buf == NULL) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        size_t k = 0;
+        for (size_t i = 1; i + 1 < n; ++i) {
+            if (i > 1 && toks->items[i].leading_space) {
+                buf[k++] = ' ';
+            }
+            memcpy(buf + k, toks->items[i].spelling, toks->items[i].spelling_len);
+            k += toks->items[i].spelling_len;
+        }
+        buf[k]     = '\0';
+        *out_name  = buf;
+        *out_len   = len;
+        *out_angle = 1;
+        *out_have  = 1;
+        return QCC_OK;
+    }
+
+    qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, loc_src, loc_off, 1,
+                  "#include expects \"FILENAME\" or <FILENAME>");
+    return QCC_OK;
+}
+
+/*
+ * #include (§6.10.2): bring another file's tokens into the stream. The header
+ * reference is read in header-name mode (§6.4.7); if that does not yield a
+ * header-name token, the line is a computed include and is macro-expanded first
+ * (§6.10.2 ¶4). The name is then resolved against the search path (ADR-0015) and
+ * the file is pushed onto the stream to be lexed in place.
+ */
+static qcc_status do_include(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    qcc_ptok   t;
+    int        fe;
+    qcc_status st = qcc_pp_stream_next_header(stream, &t, &fe);
+    if (st != QCC_OK) {
+        return st;
+    }
+
+    const char       *name     = NULL;
+    size_t            name_len  = 0;
+    int               is_angle  = 0;
+    int               have      = 0;
+    const qcc_source *loc_src   = t.source;  /* For diagnostics. */
+    size_t            loc_off   = t.offset;
+
+    if (t.kind == QCC_PP_TOKEN_HEADER_NAME && t.spelling_len >= 2) {
+        /* Forms 1 and 2 (§6.10.2 ¶1): the spelling carries its delimiters. */
+        is_angle = (t.spelling[0] == '<');
+        name     = t.spelling + 1;
+        name_len = t.spelling_len - 2;
+        have     = 1;
+        st = expect_line_end(pp, stream, 1, "include");
+        if (st != QCC_OK) {
+            return st;
+        }
+    } else if (is_line_end(&t)) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, t.source, t.offset, 1,
+                      "#include expects \"FILENAME\" or <FILENAME>");
+        return QCC_OK;
+    } else {
+        /* Form 3 (§6.10.2 ¶4): macro-expand the line, then it must read as a
+           header. `t` is its first token; collect the rest before expanding. */
+        qcc_ptok_list line;
+        qcc_ptok_list_init(&line);
+        st = qcc_ptok_list_push(&line, &t);
+        if (st == QCC_OK) {
+            st = collect_replacement(stream, &line);
+        }
+        qcc_ptok_list expanded;
+        qcc_ptok_list_init(&expanded);
+        if (st == QCC_OK) {
+            st = qcc_pp_expand_all(pp, line.items, line.count, &expanded);
+        }
+        if (st == QCC_OK) {
+            st = reconstruct_header(pp, &expanded, loc_src, loc_off, &name,
+                                    &name_len, &is_angle, &have);
+        }
+        qcc_ptok_list_dispose(&expanded);
+        qcc_ptok_list_dispose(&line);
+        if (st != QCC_OK) {
+            return st;
+        }
+    }
+
+    if (!have) {
+        return QCC_OK; /* A malformed reference already diagnosed. */
+    }
+
+    /* Refuse to recurse past the cap, catching guard-less include cycles before
+       they exhaust the stack (§5.2.4.1; ADR-0015). */
+    if (qcc_pp_stream_lexer_depth(stream) >= QCC_INCL_MAX_DEPTH) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, loc_src, loc_off, 1,
+                      "#include nested too deeply (limit %zu)",
+                      (size_t)QCC_INCL_MAX_DEPTH);
+        return QCC_OK;
+    }
+
+    /* The quote form searches the including file's own directory first. */
+    const qcc_source *cur = qcc_pp_stream_current_source(stream);
+    const char       *dir =
+        (cur != NULL) ? qcc_incl_dirname(pp->includes, cur->name) : "";
+
+    const qcc_source *inc = NULL;
+    st = qcc_incl_open(pp->includes, name, name_len, is_angle, dir, &inc);
+    if (st == QCC_ERR_IO) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, loc_src, loc_off, tok_span(&t),
+                      "'%.*s' file not found", (int)name_len, name);
+        return QCC_OK;
+    }
+    if (st != QCC_OK) {
+        return st; /* Hard fault (OOM). */
+    }
+    return qcc_pp_stream_push_source(stream, inc);
+}
+
 /* Public interface. */
 
 qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *hash)
@@ -613,8 +781,11 @@ qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *h
         if (strcmp(name.spelling, "undef") == 0) {
             return do_undef(pp, stream);
         }
-        /* #include and #line/#error/#pragma land in the next step; diagnose for
-           now so an unknown directive is never silently accepted. */
+        if (strcmp(name.spelling, "include") == 0) {
+            return do_include(pp, stream);
+        }
+        /* #line/#error/#pragma land in a later step; diagnose for now so an
+           unknown directive is never silently accepted. */
         qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
                       tok_span(&name),
                       "unsupported preprocessing directive '#%s'", name.spelling);

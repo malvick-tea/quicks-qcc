@@ -35,8 +35,13 @@ front-to-back):
   `__STDC_VERSION__`, `__STDC_HOSTED__`, `__DATE__`, `__TIME__`.
 - `internal/directive` — directive recognition/dispatch: `#define` (object- and
   function-like, variadic), `#undef`, the null directive, and the replacement-
-  list constraints (§6.10.3.2/.3). Conditionals, `#include`, and
-  `#line`/`#error`/`#pragma` land in later steps.
+  list constraints (§6.10.3.2/.3); the conditional directives (§6.10.1); and
+  `#include` in all three forms (§6.10.2). `#line`/`#error`/`#pragma` land in a
+  later step.
+- `internal/incl` — `#include` resolution (§6.10.2): the angle/quote search-path
+  lists, host path handling, and the pool of loaded sources that the resolver
+  owns for the run. Search order and ownership are recorded in
+  [ADR-0015](../../../Quicks-Meta/docs/adr/0015-qcc-include-resolution.md).
 - `internal/cond` — the conditional-inclusion stack (§6.10.1): tracks the nest
   of #if/#ifdef/#ifndef/#elif/#else/#endif groups and answers "are we emitting?".
 - `internal/ceval` — the #if/#elif controlling expression: `defined`
@@ -53,10 +58,14 @@ mutually-recursive macros terminate). The predefined macros of §6.10.8 are in
 scope from the first line. Conditional inclusion (`#if`/`#ifdef`/`#ifndef`/
 `#elif`/`#else`/`#endif`, with a full integer-constant-expression evaluator and
 the `defined` operator) selects which groups are processed; skipped groups are
-tracked for nesting but their directives are not executed (§6.10.1 ¶6). Newlines
-are consumed, not emitted (phase-4 output has none). `#include` and the CLI `-E`
-output are the remaining step; each lands with tests and this README updates with
-it.
+tracked for nesting but their directives are not executed (§6.10.1 ¶6).
+`#include` (§6.10.2) brings another file's tokens into the stream — the `<...>`
+and `"..."` literal forms and the macro-expanded "computed include" — resolved
+against a search path (the includer's own directory and the angle/quote dirs,
+ADR-0015), with `__FILE__`/`__LINE__` tracking the included file and a depth cap
+that catches guard-less include cycles. Newlines are consumed, not emitted
+(phase-4 output has none). `#line`/`#error`/`#pragma` and the CLI `-E` rendering
+are the remaining step; each lands with tests and this README updates with it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

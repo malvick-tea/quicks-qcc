@@ -265,3 +265,71 @@ qcc_status qcc_pp_stream_push_tokens(qcc_pp_stream *stream, const qcc_ptok *toks
     frame->pos   = 0;
     return QCC_OK;
 }
+
+qcc_status qcc_pp_stream_push_source(qcc_pp_stream *stream,
+                                     const qcc_source *source)
+{
+    if (stream == NULL || source == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    qcc_pp_input *frame = push_frame(stream, QCC_PP_INPUT_LEXER);
+    if (frame == NULL) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    frame->source = source;
+    qcc_lexer_init(&frame->lexer, source, stream->pp->diags);
+    return QCC_OK;
+}
+
+const qcc_source *qcc_pp_stream_current_source(const qcc_pp_stream *stream)
+{
+    if (stream == NULL) {
+        return NULL;
+    }
+    for (const qcc_pp_input *f = stream->top; f != NULL; f = f->below) {
+        if (f->kind == QCC_PP_INPUT_LEXER) {
+            return f->source;
+        }
+    }
+    return NULL;
+}
+
+size_t qcc_pp_stream_lexer_depth(const qcc_pp_stream *stream)
+{
+    if (stream == NULL) {
+        return 0;
+    }
+    size_t depth = 0;
+    for (const qcc_pp_input *f = stream->top; f != NULL; f = f->below) {
+        if (f->kind == QCC_PP_INPUT_LEXER) {
+            ++depth;
+        }
+    }
+    return depth;
+}
+
+qcc_status qcc_pp_stream_next_header(qcc_pp_stream *stream, qcc_ptok *out,
+                                     int *from_expansion)
+{
+    if (stream == NULL || out == NULL || from_expansion == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    /* A header-name is only produced by a live file lexer with no pending
+       pushback (§6.4.7). A real #include line is exactly that; otherwise read
+       normally and let the caller treat the result as a computed include. */
+    if (stream->has_pending || stream->top == NULL ||
+        stream->top->kind != QCC_PP_INPUT_LEXER) {
+        return qcc_pp_stream_next(stream, out, from_expansion);
+    }
+
+    qcc_pp_input *frame = stream->top;
+    qcc_lexer_set_header_mode(&frame->lexer, 1);
+    qcc_status st = qcc_pp_stream_next(stream, out, from_expansion);
+    /* Reset the mode for subsequent reads, but only if the frame is still the
+       top input: a frame that reached EOF was popped and freed by next() (a
+       header-name read of a real directive line never reaches EOF first). */
+    if (stream->top == frame) {
+        qcc_lexer_set_header_mode(&frame->lexer, 0);
+    }
+    return st;
+}
