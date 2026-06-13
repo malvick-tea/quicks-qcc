@@ -550,6 +550,44 @@ static void test_conditional_errors(void)
     cleanup(&pp, &d, &s, &out);
 }
 
+/* #error emits one error diagnostic and is inert inside a skipped group. */
+static void test_error_directive(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+
+    QTEST_CHECK_EQ_INT(run("#error something is wrong\nx\n", &pp, &d, &s, &out),
+                       QCC_OK, "run");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "#error is one error");
+    cleanup(&pp, &d, &s, &out);
+
+    /* #error in a not-taken group is not executed (§6.10.1 ¶6). */
+    QTEST_CHECK_EQ_INT(run("#if 0\n#error must not fire\n#endif\nok\n",
+                           &pp, &d, &s, &out), QCC_OK, "run2");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "skipped #error does not fire");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "ok");
+    cleanup(&pp, &d, &s, &out);
+
+    /* A bare #error is still an error. */
+    QTEST_CHECK_EQ_INT(run("#error\n", &pp, &d, &s, &out), QCC_OK, "run3");
+    QTEST_CHECK_EQ_UINT(errors(&d), 1, "bare #error");
+    cleanup(&pp, &d, &s, &out);
+}
+
+/* #pragma is recognized and ignored; its line contributes no tokens (§6.10.6). */
+static void test_pragma_directive(void)
+{
+    qcc_pp pp; qcc_diag_sink d; qcc_source s; qcc_ptok_list out;
+    QTEST_CHECK_EQ_INT(run("#pragma once\n#pragma qcc whatever\nint x;\n",
+                           &pp, &d, &s, &out), QCC_OK, "run");
+    /* int x ; EOF — the pragmas vanish, with no diagnostic. */
+    QTEST_CHECK_EQ_UINT(out.count, 4, "count");
+    chk(&out, 0, QCC_PP_TOKEN_IDENTIFIER, "int");
+    chk(&out, 1, QCC_PP_TOKEN_IDENTIFIER, "x");
+    QTEST_CHECK_EQ_UINT(errors(&d), 0, "pragma is silent");
+    QTEST_CHECK_EQ_UINT(warnings(&d), 0, "pragma is silent");
+    cleanup(&pp, &d, &s, &out);
+}
+
 /* Argument validation and NULL-safety. */
 static void test_invalid_args(void)
 {
@@ -601,6 +639,8 @@ int main(void)
     test_ifdef();
     test_nested_and_skipped();
     test_conditional_errors();
+    test_error_directive();
+    test_pragma_directive();
     test_invalid_args();
     return qtest_report("pp");
 }

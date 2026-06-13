@@ -35,9 +35,9 @@ front-to-back):
   `__STDC_VERSION__`, `__STDC_HOSTED__`, `__DATE__`, `__TIME__`.
 - `internal/directive` — directive recognition/dispatch: `#define` (object- and
   function-like, variadic), `#undef`, the null directive, and the replacement-
-  list constraints (§6.10.3.2/.3); the conditional directives (§6.10.1); and
-  `#include` in all three forms (§6.10.2). `#line`/`#error`/`#pragma` land in a
-  later step.
+  list constraints (§6.10.3.2/.3); the conditional directives (§6.10.1);
+  `#include` in all three forms (§6.10.2); `#error` (§6.10.5); and `#pragma`
+  (§6.10.6, recognized and ignored). `#line` (§6.10.4) lands in a later step.
 - `internal/incl` — `#include` resolution (§6.10.2): the angle/quote search-path
   lists, host path handling, and the pool of loaded sources that the resolver
   owns for the run. Search order and ownership are recorded in
@@ -63,9 +63,11 @@ tracked for nesting but their directives are not executed (§6.10.1 ¶6).
 and `"..."` literal forms and the macro-expanded "computed include" — resolved
 against a search path (the includer's own directory and the angle/quote dirs,
 ADR-0015), with `__FILE__`/`__LINE__` tracking the included file and a depth cap
-that catches guard-less include cycles. Newlines are consumed, not emitted
-(phase-4 output has none). `#line`/`#error`/`#pragma` and the CLI `-E` rendering
-are the remaining step; each lands with tests and this README updates with it.
+that catches guard-less include cycles. `#error` (§6.10.5) reports the program
+ill-formed with its tokens in the message; `#pragma` (§6.10.6) is recognized and
+ignored. Newlines are consumed, not emitted (phase-4 output has none). `#line`
+(§6.10.4) and the CLI `-E` rendering are the remaining step; each lands with
+tests and this README updates with it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

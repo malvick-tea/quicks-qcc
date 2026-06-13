@@ -3,15 +3,17 @@
  *
  * See directive.h for the contract. This implements #define (object- and
  * function-like, including variadic) and #undef plus the null directive
- * (§6.10.7), the conditional-inclusion directives (§6.10.1), and #include
- * (§6.10.2) in all three forms (<...>, "...", and the macro-expanded "computed
- * include"). The remaining line-control/diagnostic directives (#line, #error,
- * #pragma) are diagnosed-and-skipped until they land.
+ * (§6.10.7), the conditional-inclusion directives (§6.10.1), #include (§6.10.2)
+ * in all three forms (<...>, "...", and the macro-expanded "computed include"),
+ * and the diagnostic/marker directives #error (§6.10.5) and #pragma (§6.10.6,
+ * recognized and ignored). #line (§6.10.4) is diagnosed-and-skipped until it
+ * lands.
  *
  * Spec anchors: §6.10.3 (macro definition), §6.10.3 ¶5 (__VA_ARGS__ / reserved
  * parameter rules), §6.10.3.2 ¶1 (# must precede a parameter), §6.10.3.3 ¶1
  * (## not at either end of a replacement list), §6.10.3.5 (#undef), §6.10.2
- * (#include and the search path; resolution policy in ADR-0015).
+ * (#include and the search path; resolution policy in ADR-0015), §6.10.5
+ * (#error), §6.10.6 (#pragma).
  */
 #include "pp/internal/directive.h"
 
@@ -726,6 +728,88 @@ static qcc_status do_include(qcc_pp *pp, qcc_pp_stream *stream)
     return qcc_pp_stream_push_source(stream, inc);
 }
 
+/*
+ * Reconstruct the text of the rest of the logical line (consuming its newline)
+ * as a single-space-joined arena string — the spelling of each remaining token,
+ * with one space wherever the source separated two of them. Used for #error's
+ * message (§6.10.5). On success *out_text/*out_len are set (text NUL-terminated,
+ * never NULL). Returns QCC_OK or QCC_ERR_OUT_OF_MEMORY.
+ */
+static qcc_status collect_line_text(qcc_pp *pp, qcc_pp_stream *stream,
+                                    const char **out_text, size_t *out_len)
+{
+    qcc_ptok_list line;
+    qcc_ptok_list_init(&line);
+    qcc_status st = collect_replacement(stream, &line);
+    if (st != QCC_OK) {
+        qcc_ptok_list_dispose(&line);
+        return st;
+    }
+
+    size_t len = 0;
+    for (size_t i = 0; i < line.count; ++i) {
+        if (i > 0 && line.items[i].leading_space) {
+            len += 1;
+        }
+        len += line.items[i].spelling_len;
+    }
+    char *buf = (char *)qcc_arena_alloc(&pp->arena, len + 1, 1);
+    if (buf == NULL) {
+        qcc_ptok_list_dispose(&line);
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < line.count; ++i) {
+        if (i > 0 && line.items[i].leading_space) {
+            buf[k++] = ' ';
+        }
+        memcpy(buf + k, line.items[i].spelling, line.items[i].spelling_len);
+        k += line.items[i].spelling_len;
+    }
+    buf[k] = '\0';
+    qcc_ptok_list_dispose(&line);
+    *out_text = buf;
+    *out_len  = len;
+    return QCC_OK;
+}
+
+/*
+ * #error (§6.10.5): the directive renders the program ill-formed; the remaining
+ * tokens are included verbatim in the diagnostic. In our recoverable model this
+ * is an ERROR on the sink (so the tool exits nonzero) and the line is skipped.
+ */
+static qcc_status do_error(qcc_pp *pp, qcc_pp_stream *stream,
+                           const qcc_ptok *name)
+{
+    const char *text = NULL;
+    size_t      len  = 0;
+    qcc_status  st   = collect_line_text(pp, stream, &text, &len);
+    if (st != QCC_OK) {
+        return st;
+    }
+    if (len == 0) {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name->source, name->offset,
+                      tok_span(name), "#error");
+    } else {
+        qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name->source, name->offset,
+                      tok_span(name), "#error %.*s", (int)len, text);
+    }
+    return QCC_OK;
+}
+
+/*
+ * #pragma (§6.10.6): no pragma has implementation-defined behavior in qcc yet,
+ * so a recognized #pragma is accepted and its line ignored (the `_Pragma`
+ * operator of §6.10.9 and all pragma semantics are deferred per ADR-0014).
+ * Ignoring rather than diagnosing keeps real headers — `#pragma once`,
+ * `#pragma GCC ...` — preprocessing cleanly.
+ */
+static qcc_status do_pragma(qcc_pp *pp, qcc_pp_stream *stream)
+{
+    (void)pp;
+    return skip_to_line_end(stream);
+}
+
 /* Public interface. */
 
 qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *hash)
@@ -784,8 +868,14 @@ qcc_status qcc_pp_directive(qcc_pp *pp, qcc_pp_stream *stream, const qcc_ptok *h
         if (strcmp(name.spelling, "include") == 0) {
             return do_include(pp, stream);
         }
-        /* #line/#error/#pragma land in a later step; diagnose for now so an
-           unknown directive is never silently accepted. */
+        if (strcmp(name.spelling, "error") == 0) {
+            return do_error(pp, stream, &name);
+        }
+        if (strcmp(name.spelling, "pragma") == 0) {
+            return do_pragma(pp, stream);
+        }
+        /* #line lands in a later step; diagnose any other directive so an
+           unknown one is never silently accepted. */
         qcc_diag_emit(pp->diags, QCC_DIAG_ERROR, name.source, name.offset,
                       tok_span(&name),
                       "unsupported preprocessing directive '#%s'", name.spelling);
