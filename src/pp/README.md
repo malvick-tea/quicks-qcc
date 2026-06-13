@@ -25,8 +25,11 @@ front-to-back):
   lexer's span-backed tokens into `qcc_ptok` (the one place that happens),
   pushes macro replacements for rescanning and (later) `#include`d files, and
   flags whether a token came from a macro expansion.
-- `internal/expand` — macro expansion (object-like now; function-like, `#`,
-  `##` next), using hide sets as the recursion guard.
+- `internal/expand` — macro expansion: object- and function-like, argument
+  collection (with a variadic tail), argument pre-expansion in isolation
+  (§6.10.3.1), Prosser substitution, and hide-set rescan.
+- `internal/glue` — the `#` (stringize, §6.10.3.2) and `##` (paste, §6.10.3.3)
+  operators; paste re-lexes the concatenation with the real lexer.
 - `internal/directive` — directive recognition/dispatch: `#define` (object- and
   function-like, variadic), `#undef`, the null directive, and the replacement-
   list constraints (§6.10.3.2/.3). Conditionals, `#include`, and
@@ -35,11 +38,13 @@ front-to-back):
 - `pp.c` — the line-oriented driver; `ptok_list.c` — the token list.
 
 **Current behavior:** `qcc_pp_run` runs the phase-4 loop: it materializes the
-token stream, executes `#define`/`#undef`, and expands object-like macros with
-hide-set-based recursion control (self- and mutually-recursive macros terminate).
-Newlines are consumed, not emitted (phase-4 output has none). Function-like
-expansion, `#`/`##`, conditionals, and `#include` are added through the
-remaining submodules; each lands with tests and this README updates with it.
+token stream, executes `#define`/`#undef`, and expands object- and function-like
+macros — including `#`, `##`, variadic `__VA_ARGS__`, argument pre-expansion, and
+line-spanning invocations — with hide-set-based recursion control (self- and
+mutually-recursive macros terminate). Newlines are consumed, not emitted (phase-4
+output has none). Conditional inclusion, `#include`, and predefined macros are
+added through the remaining submodules; each lands with tests and this README
+updates with it.
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal

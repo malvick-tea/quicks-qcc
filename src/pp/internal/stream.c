@@ -95,19 +95,31 @@ static qcc_status materialize(qcc_pp_stream *stream, const qcc_source *src,
 
 /* Public interface. */
 
+/* Shared field setup for both init variants; allocates the scratch buffer. */
+static qcc_status common_init(qcc_pp_stream *stream, qcc_pp *pp)
+{
+    stream->pp                     = pp;
+    stream->top                    = NULL;
+    stream->has_pending            = 0;
+    stream->pending_from_expansion = 0;
+    stream->scratch                = (char *)malloc(QCC_PP_STREAM_SCRATCH_INITIAL);
+    stream->scratch_cap            = QCC_PP_STREAM_SCRATCH_INITIAL;
+    if (stream->scratch == NULL) {
+        stream->scratch_cap = 0;
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    return QCC_OK;
+}
+
 qcc_status qcc_pp_stream_init(qcc_pp_stream *stream, qcc_pp *pp,
                               const qcc_source *source)
 {
     if (stream == NULL || pp == NULL || source == NULL) {
         return QCC_ERR_INVALID_ARGUMENT;
     }
-    stream->pp          = pp;
-    stream->top         = NULL;
-    stream->scratch     = (char *)malloc(QCC_PP_STREAM_SCRATCH_INITIAL);
-    stream->scratch_cap = QCC_PP_STREAM_SCRATCH_INITIAL;
-    if (stream->scratch == NULL) {
-        stream->scratch_cap = 0;
-        return QCC_ERR_OUT_OF_MEMORY;
+    qcc_status st = common_init(stream, pp);
+    if (st != QCC_OK) {
+        return st;
     }
 
     qcc_pp_input *frame = push_frame(stream, QCC_PP_INPUT_LEXER);
@@ -118,6 +130,42 @@ qcc_status qcc_pp_stream_init(qcc_pp_stream *stream, qcc_pp *pp,
     }
     frame->source = source;
     qcc_lexer_init(&frame->lexer, source, pp->diags);
+    return QCC_OK;
+}
+
+qcc_status qcc_pp_stream_init_tokens(qcc_pp_stream *stream, qcc_pp *pp,
+                                     const qcc_ptok *toks, size_t count)
+{
+    if (stream == NULL || pp == NULL || (toks == NULL && count != 0)) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    qcc_status st = common_init(stream, pp);
+    if (st != QCC_OK) {
+        return st;
+    }
+    if (count != 0) {
+        qcc_pp_input *frame = push_frame(stream, QCC_PP_INPUT_TOKENS);
+        if (frame == NULL) {
+            free(stream->scratch);
+            stream->scratch = NULL;
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        frame->toks  = toks;
+        frame->count = count;
+        frame->pos   = 0;
+    }
+    return QCC_OK;
+}
+
+qcc_status qcc_pp_stream_unget(qcc_pp_stream *stream, const qcc_ptok *tok,
+                               int from_expansion)
+{
+    if (stream == NULL || tok == NULL || stream->has_pending) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    stream->pending                = *tok;
+    stream->has_pending            = 1;
+    stream->pending_from_expansion = from_expansion;
     return QCC_OK;
 }
 
@@ -140,6 +188,13 @@ qcc_status qcc_pp_stream_next(qcc_pp_stream *stream, qcc_ptok *out,
 {
     if (stream == NULL || out == NULL || from_expansion == NULL) {
         return QCC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (stream->has_pending) {
+        *out                = stream->pending;
+        *from_expansion     = stream->pending_from_expansion;
+        stream->has_pending = 0;
+        return QCC_OK;
     }
 
     for (;;) {

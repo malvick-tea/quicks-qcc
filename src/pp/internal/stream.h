@@ -67,6 +67,9 @@ typedef struct qcc_pp_stream {
     qcc_pp_input  *top;         /* Current input; NULL once fully exhausted.     */
     char          *scratch;     /* Spelling-recovery buffer (grows, reused).     */
     size_t         scratch_cap;
+    qcc_ptok       pending;     /* One-token pushback (qcc_pp_stream_unget).     */
+    int            has_pending; /* 1 if `pending` is live.                       */
+    int            pending_from_expansion; /* from_expansion to report for it.   */
 } qcc_pp_stream;
 
 /*
@@ -77,8 +80,26 @@ typedef struct qcc_pp_stream {
 qcc_status qcc_pp_stream_init(qcc_pp_stream *stream, qcc_pp *pp,
                               const qcc_source *source);
 
+/*
+ * Initialize a stream whose bottom input is a fixed token array (rather than a
+ * file lexer). Used to macro-expand a macro argument in isolation — "as if it
+ * formed the rest of the preprocessing file" (§6.10.3.1 ¶1). `toks` must outlive
+ * the stream (allocate it in the arena). Returns QCC_OK or an init error.
+ */
+qcc_status qcc_pp_stream_init_tokens(qcc_pp_stream *stream, qcc_pp *pp,
+                                     const qcc_ptok *toks, size_t count);
+
 /* Free the input stack and scratch buffer; zero the stream. NULL-safe. */
 void qcc_pp_stream_dispose(qcc_pp_stream *stream);
+
+/*
+ * Push one token back so the next qcc_pp_stream_next returns it (with the given
+ * from_expansion). Exactly one token of pushback is supported; ungetting twice
+ * without an intervening next returns QCC_ERR_INVALID_ARGUMENT. Used to look one
+ * token ahead for the '(' of a function-like macro invocation (§6.10.3 ¶10).
+ */
+qcc_status qcc_pp_stream_unget(qcc_pp_stream *stream, const qcc_ptok *tok,
+                               int from_expansion);
 
 /*
  * Produce the next token into *out. After the last token, *out is a
