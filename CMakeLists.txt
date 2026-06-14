@@ -58,6 +58,8 @@ add_library(qcc_core STATIC
     src/convert/internal/escape.c
     src/convert/internal/charconst.c
     src/convert/internal/strlit.c
+    src/ast/ast.c
+    src/parser/parser.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include
