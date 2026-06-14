@@ -28,6 +28,21 @@ const char *qcc_pp_token_kind_name(qcc_pp_token_kind kind)
     return "unknown"; /* Out-of-range integer cast to the enum; stay total. */
 }
 
+const char *qcc_token_kind_name(qcc_token_kind kind)
+{
+    switch (kind) {
+    case QCC_TOKEN_EOF:        return "eof";
+    case QCC_TOKEN_KEYWORD:    return "keyword";
+    case QCC_TOKEN_IDENTIFIER: return "identifier";
+    case QCC_TOKEN_INTEGER:    return "integer-constant";
+    case QCC_TOKEN_FLOATING:   return "floating-constant";
+    case QCC_TOKEN_CHAR:       return "character-constant";
+    case QCC_TOKEN_STRING:     return "string-literal";
+    case QCC_TOKEN_PUNCT:      return "punctuator";
+    }
+    return "unknown"; /* Out-of-range integer cast to the enum; stay total. */
+}
+
 /*
  * Primary spellings, indexed by qcc_punct. The order MUST match the enum in
  * token.h exactly; test_token locks the correspondence down entry by entry so

@@ -180,6 +180,52 @@ typedef struct qcc_pp_token {
 /* Stable lowercase name of a pp-token kind ("identifier", "pp-number", …). */
 const char *qcc_pp_token_kind_name(qcc_pp_token_kind kind);
 
+/* Forward declaration: a phase-7 token records its provenance source for
+   diagnostics, but `token` stays free of a source.h dependency (ADR-0008). */
+struct qcc_source;
+
+/*
+ * A phase-7 token (§6.4 ¶3) — the vocabulary the parser consumes, produced from
+ * preprocessing tokens by the `convert` stage (translation phases 5-7,
+ * §5.1.1.2). It differs from a preprocessing token in exactly the ways §6.4 ¶3
+ * does: an identifier that spells a keyword has become a keyword (§6.4.1 ¶2), and
+ * a pp-number (the over-broad §6.4.8 shape) has been classified as an integer or
+ * floating constant (§6.4.4). Evaluated constant *values* (the integer/floating/
+ * character value, the decoded string bytes) are added as the `convert` units
+ * that compute them land (ADR-0017); until then a constant token is told apart by
+ * `kind` and carries its source lexeme in `spelling`.
+ *
+ * Like a preprocessing token it is a plain value (copy freely). `spelling` is
+ * interned by the producing `convert` and valid for that stage's lifetime;
+ * `source`/`offset`/`line`/`column` locate the token for diagnostics.
+ */
+typedef enum qcc_token_kind {
+    QCC_TOKEN_EOF = 0,      /* End of the token stream; always the final token.   */
+    QCC_TOKEN_KEYWORD,      /* §6.4.1; `keyword` is the resolved keyword.         */
+    QCC_TOKEN_IDENTIFIER,   /* §6.4.2.1, and not a keyword.                       */
+    QCC_TOKEN_INTEGER,      /* §6.4.4.1 integer constant.                         */
+    QCC_TOKEN_FLOATING,     /* §6.4.4.2 floating constant.                        */
+    QCC_TOKEN_CHAR,         /* §6.4.4.4 character constant.                       */
+    QCC_TOKEN_STRING,       /* §6.4.5 string literal.                             */
+    QCC_TOKEN_PUNCT         /* §6.4.6; `punct` says which.                        */
+} qcc_token_kind;
+
+typedef struct qcc_token {
+    qcc_token_kind           kind;
+    qcc_keyword              keyword;      /* Valid iff kind == QCC_TOKEN_KEYWORD. */
+    qcc_punct                punct;        /* Valid iff kind == QCC_TOKEN_PUNCT.   */
+    const char              *spelling;     /* Interned source lexeme; never NULL.  */
+    size_t                   spelling_len;
+    const struct qcc_source *source;       /* Provenance; may be NULL (EOF).       */
+    size_t                   offset;
+    uint32_t                 line;
+    uint32_t                 column;
+    unsigned                 leading_space : 1; /* Whitespace preceded it.         */
+} qcc_token;
+
+/* Stable lowercase name of a token kind ("keyword", "integer-constant", …). */
+const char *qcc_token_kind_name(qcc_token_kind kind);
+
 /*
  * Canonical (primary) spelling of a punctuator — "[" for QCC_PUNCT_LBRACKET
  * even if the source wrote "<:". Static string, never NULL for valid input;

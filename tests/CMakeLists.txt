@@ -23,6 +23,7 @@ qcc_add_test(hideset)
 qcc_add_test(macro)
 qcc_add_test(pp)
 qcc_add_test(render)
+qcc_add_test(convert)
 
 # The #include suite needs real header files. Generate them into the build tree
 # so the test is hermetic: it depends on these fixtures and their directories
