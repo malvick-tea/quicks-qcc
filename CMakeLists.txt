@@ -40,6 +40,7 @@ add_library(qcc_core STATIC
     src/lexer/internal/punct.c
     src/pp/pp.c
     src/pp/ptok_list.c
+    src/pp/render.c
     src/pp/internal/hideset.c
     src/pp/internal/macro.c
     src/pp/internal/stream.c

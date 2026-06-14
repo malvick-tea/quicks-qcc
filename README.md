@@ -10,11 +10,17 @@ project's central milestone.
 > [ADR-0002 self-host then disown](../Quicks-Meta/docs/adr/0002-bootstrap-self-host-then-disown.md).
 
 ## Status
-**Phase 4 — in progress.** Pipeline stage 1 (the lexer) is done: translation
-phases 1-3 per ISO C11 §5.1.1.2 — line splicing everywhere, comments to one
-space, maximal-munch pp-tokens with digraphs, literal prefixes, UCNs, and the
-contextual header-name mode — on top of the foundation modules (status, source,
-diag, token), all tested. Built with the seed compiler first; then subjected to the
+**Phase 4 — in progress; the front end runs through preprocessing.** The lexer
+(translation phases 1-3, ISO C11 §5.1.1.2 — line splicing everywhere, comments to
+one space, maximal-munch pp-tokens with digraphs, literal prefixes, UCNs, and the
+contextual header-name mode) feeds a complete **preprocessor** (phase 4, §6.10):
+object- and function-like macros with `#`/`##`, variadics and hide-set recursion
+control; the predefined macros (§6.10.8); the full conditional-inclusion set with
+an integer `#if` evaluator; `#include` with a search path; and `#error`,
+`#pragma`, and `#line` — every §6.10 directive. `qcc -E [-I dir] [-iquote dir]
+file.c` preprocesses a translation unit and prints the result. All on the
+foundation modules (status, source, diag, arena, intern, token), with twelve test
+suites. Built with the seed compiler first; then subjected to the
 **self-compilation constraint**: `qcc` may use only the C subset `qcc` itself supports.
 
 ## Planned pipeline (large-scale by design — ADR/vision "hardest sensible option")

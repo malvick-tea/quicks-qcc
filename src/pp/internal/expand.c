@@ -267,7 +267,12 @@ static qcc_status expand_object(qcc_pp *pp, qcc_pp_stream *stream,
         copy[i].hideset       = u;
         copy[i].at_line_start = 0;
     }
+    /* The replacement sits on the invocation's logical line: its first token
+       begins that line exactly when the macro name did (so a line-leading macro
+       still renders at the start of its line). 'from_expansion' keeps this from
+       ever being read as a directive '#' (§6.10.3.4 ¶3). */
     copy[0].leading_space = name->leading_space;
+    copy[0].at_line_start = name->at_line_start;
     return qcc_pp_stream_push_tokens(stream, copy, n);
 }
 
@@ -624,7 +629,10 @@ static qcc_status substitute(qcc_pp *pp, const qcc_macro *macro,
             tk.at_line_start = 0;
             final_toks[j++]  = tk;
         }
+        /* As in object-like expansion: the first output token inherits the
+           macro name's line-start so a line-leading call renders correctly. */
         final_toks[0].leading_space = name->leading_space;
+        final_toks[0].at_line_start = name->at_line_start;
     }
 
     subst_free(&os);

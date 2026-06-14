@@ -50,6 +50,10 @@ front-to-back):
   recursive-descent evaluator with C precedence, the usual arithmetic
   conversions, and short-circuit &&/||/?:.
 - `pp.c` — the line-oriented driver; `ptok_list.c` — the token list.
+- `render.{h,c}` — a pp-level utility (not an `internal/` part): render a phase-4
+  token stream back to text for the CLI's `-E`, reconstructing lines from
+  `at_line_start` and forcing a space wherever two tokens would otherwise paste,
+  so the output re-lexes to the same tokens.
 
 **Current behavior:** `qcc_pp_run` runs the phase-4 loop: it materializes the
 token stream, executes `#define`/`#undef`, and expands object- and function-like
@@ -68,9 +72,10 @@ that catches guard-less include cycles. `#error` (§6.10.5) reports the program
 ill-formed with its tokens in the message; `#pragma` (§6.10.6) is recognized and
 ignored; `#line` (§6.10.4) sets the presumed line/file that `__LINE__`/`__FILE__`
 report (ADR-0016). Every §6.10 directive is now implemented. Newlines are
-consumed, not emitted (phase-4 output has none). The CLI `-E` rendering is the
-remaining phase-4 deliverable; it lands with tests and this README updates with
-it.
+consumed, not emitted (phase-4 output has none); the `render` utility
+reconstructs them for the CLI's `qcc -E`, which preprocesses a translation unit
+and prints faithful, re-lexable text. With `-E` the preprocessor is usable end to
+end; the next phase-4-adjacent step is `convert` (phase 7).
 
 **Key invariants:** the lexer→`qcc_ptok` materialization is the single boundary
 between the two token vocabularies; every `qcc_ptok` spelling is interned (equal
