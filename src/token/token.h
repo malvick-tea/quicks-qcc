@@ -210,6 +210,21 @@ typedef enum qcc_token_kind {
     QCC_TOKEN_PUNCT         /* §6.4.6; `punct` says which.                        */
 } qcc_token_kind;
 
+/*
+ * The type of an integer constant (§6.4.4.1 ¶5), as resolved against the
+ * target's widths (x86-64 System V LP64: int 32, long 64, long long 64). The
+ * order is the candidate-list order — a constant takes the first of its allowed
+ * types whose representation holds its value.
+ */
+typedef enum qcc_int_type {
+    QCC_INT_INT = 0,   /* int                */
+    QCC_INT_UINT,      /* unsigned int       */
+    QCC_INT_LONG,      /* long               */
+    QCC_INT_ULONG,     /* unsigned long      */
+    QCC_INT_LLONG,     /* long long          */
+    QCC_INT_ULLONG     /* unsigned long long */
+} qcc_int_type;
+
 typedef struct qcc_token {
     qcc_token_kind           kind;
     qcc_keyword              keyword;      /* Valid iff kind == QCC_TOKEN_KEYWORD. */
@@ -221,10 +236,22 @@ typedef struct qcc_token {
     uint32_t                 line;
     uint32_t                 column;
     unsigned                 leading_space : 1; /* Whitespace preceded it.         */
+
+    /*
+     * Evaluated constant value, filled by the `convert` units that compute it
+     * (ADR-0017); zero/default for other kinds.
+     *   int_value/int_type : the value and type of an integer constant
+     *                        (§6.4.4.1), valid iff kind == QCC_TOKEN_INTEGER.
+     */
+    uint64_t                 int_value;
+    qcc_int_type             int_type;
 } qcc_token;
 
 /* Stable lowercase name of a token kind ("keyword", "integer-constant", …). */
 const char *qcc_token_kind_name(qcc_token_kind kind);
+
+/* Stable C spelling of an integer-constant type ("int", "unsigned long", …). */
+const char *qcc_int_type_name(qcc_int_type type);
 
 /*
  * Canonical (primary) spelling of a punctuator — "[" for QCC_PUNCT_LBRACKET

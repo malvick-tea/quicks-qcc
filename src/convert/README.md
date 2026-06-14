@@ -27,10 +27,19 @@ preprocessing token to a token:
 - a surviving `OTHER` or header-name preprocessing token is a stray token and is
   diagnosed (§6.4 ¶3); newlines do not occur in phase-4 output.
 
-**Staged next (ADR-0017):** Unit B — integer/floating constant value and type
-(§6.4.4.1/.2); Unit C — character/string value with escape decoding (§6.4.4.4,
-§6.4.5) and the phase-6 concatenation of adjacent string literals. Until then a
-constant token carries its lexeme and is told apart by `kind`.
+**Integer constants (Unit B, §6.4.4.1):** an INTEGER token also carries its
+`int_value` and `int_type`. `internal/intconst` parses the base (decimal, octal
+`0…`, hex `0x…`) and the `u`/`l`/`ll` suffix by hand (no `strtoull`, so it runs
+under the self-hosted toolchain later), detects overflow, and picks the type as
+the first of the constant's §6.4.4.1 ¶5 candidate list that holds the value
+against the x86-64 LP64 widths (int 32, long/long long 64). Bad digits, invalid
+suffixes, and out-of-range values are diagnosed; evaluation is best-effort so
+conversion continues.
+
+**Staged next (ADR-0017):** the floating half of Unit B — floating-constant value
+and type (§6.4.4.2); Unit C — character/string value with escape decoding
+(§6.4.4.4, §6.4.5) and the phase-6 concatenation of adjacent string literals.
+Until then those constant tokens carry their lexeme and are told apart by `kind`.
 
 **Key invariants:** output token spellings are interned through the converter's
 own `arena`/`intern`, so the token stream owns its spellings independently of the

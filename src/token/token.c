@@ -43,6 +43,19 @@ const char *qcc_token_kind_name(qcc_token_kind kind)
     return "unknown"; /* Out-of-range integer cast to the enum; stay total. */
 }
 
+const char *qcc_int_type_name(qcc_int_type type)
+{
+    switch (type) {
+    case QCC_INT_INT:    return "int";
+    case QCC_INT_UINT:   return "unsigned int";
+    case QCC_INT_LONG:   return "long";
+    case QCC_INT_ULONG:  return "unsigned long";
+    case QCC_INT_LLONG:  return "long long";
+    case QCC_INT_ULLONG: return "unsigned long long";
+    }
+    return "unknown";
+}
+
 /*
  * Primary spellings, indexed by qcc_punct. The order MUST match the enum in
  * token.h exactly; test_token locks the correspondence down entry by entry so

@@ -52,6 +52,7 @@ add_library(qcc_core STATIC
     src/pp/internal/directive.c
     src/pp/internal/incl.c
     src/convert/convert.c
+    src/convert/internal/intconst.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include

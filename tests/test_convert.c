@@ -172,6 +172,81 @@ static void test_stray_token(void)
     ctx_free(&c);
 }
 
+/* Integer constants get a value and a type (§6.4.4.1). */
+static void chk_int(const qcc_token_list *t, size_t i, uint64_t value,
+                    qcc_int_type type)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        QTEST_CHECK_EQ_INT(t->items[i].kind, QCC_TOKEN_INTEGER, "integer kind");
+        QTEST_CHECK_EQ_UINT(t->items[i].int_value, value, "int value");
+        QTEST_CHECK_EQ_INT(t->items[i].int_type, type, "int type");
+    }
+}
+
+static void test_integer_values(void)
+{
+    cvctx c;
+    /* Bases. */
+    do_convert("0 42 0xFF 010 0x0\n", &c);
+    chk_int(&c.toks, 0, 0u, QCC_INT_INT);
+    chk_int(&c.toks, 1, 42u, QCC_INT_INT);
+    chk_int(&c.toks, 2, 255u, QCC_INT_INT);
+    chk_int(&c.toks, 3, 8u, QCC_INT_INT);   /* octal 010 */
+    chk_int(&c.toks, 4, 0u, QCC_INT_INT);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* Type widening by value (LP64): decimal picks signed types. */
+    do_convert("2147483647 2147483648 4294967296\n", &c);
+    chk_int(&c.toks, 0, 2147483647u, QCC_INT_INT);          /* INT_MAX     */
+    chk_int(&c.toks, 1, 2147483648u, QCC_INT_LONG);         /* > INT_MAX   */
+    chk_int(&c.toks, 2, 4294967296u, QCC_INT_LONG);
+    ctx_free(&c);
+
+    /* Hexadecimal without a suffix may pick unsigned int. */
+    do_convert("0xFFFFFFFF 0x100000000\n", &c);
+    chk_int(&c.toks, 0, 4294967295u, QCC_INT_UINT);         /* UINT_MAX    */
+    chk_int(&c.toks, 1, 4294967296u, QCC_INT_LONG);
+    ctx_free(&c);
+
+    /* Suffixes. */
+    do_convert("42u 42L 42UL 42ll 42ull 0x10ULL\n", &c);
+    chk_int(&c.toks, 0, 42u, QCC_INT_UINT);
+    chk_int(&c.toks, 1, 42u, QCC_INT_LONG);
+    chk_int(&c.toks, 2, 42u, QCC_INT_ULONG);
+    chk_int(&c.toks, 3, 42u, QCC_INT_LLONG);
+    chk_int(&c.toks, 4, 42u, QCC_INT_ULLONG);
+    chk_int(&c.toks, 5, 16u, QCC_INT_ULLONG);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* The widest value, and a decimal value too large for any signed type. */
+    do_convert("18446744073709551615 9223372036854775808\n", &c);
+    chk_int(&c.toks, 0, 18446744073709551615u, QCC_INT_ULLONG); /* ULLONG_MAX */
+    /* 2^63 has no signed type; becomes unsigned long long with a warning. */
+    chk_int(&c.toks, 1, 9223372036854775808u, QCC_INT_ULLONG);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "large constants are warnings, not errors");
+    ctx_free(&c);
+}
+
+/* Malformed integer constants are diagnosed. */
+static void test_integer_errors(void)
+{
+    cvctx c;
+    do_convert("08\n", &c); /* 8 is not an octal digit. */
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "invalid octal digit");
+    ctx_free(&c);
+
+    do_convert("42z\n", &c); /* z is not a valid suffix. */
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "invalid suffix");
+    ctx_free(&c);
+
+    do_convert("0x\n", &c); /* no hex digits. */
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "empty hex constant");
+    ctx_free(&c);
+}
+
 /* An empty translation unit converts to just EOF. */
 static void test_empty(void)
 {
@@ -210,6 +285,8 @@ int main(void)
     test_char_and_string();
     test_punctuators();
     test_stray_token();
+    test_integer_values();
+    test_integer_errors();
     test_empty();
     test_invalid_args();
     return qtest_report("convert");

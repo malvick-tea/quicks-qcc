@@ -13,6 +13,8 @@
 
 #include <stdlib.h>
 
+#include "convert/internal/intconst.h"
+
 /* The token list. */
 
 void qcc_token_list_init(qcc_token_list *list)
@@ -140,6 +142,8 @@ static qcc_status fill_token(qcc_convert *cv, const qcc_ptok *in,
     out->line          = in->line;
     out->column        = in->column;
     out->leading_space = in->leading_space;
+    out->int_value     = 0;
+    out->int_type      = QCC_INT_INT;
     return QCC_OK;
 }
 
@@ -157,6 +161,8 @@ static qcc_token eof_token(const qcc_ptok *in)
     t.line          = (in != NULL) ? in->line : 0;
     t.column        = (in != NULL) ? in->column : 0;
     t.leading_space = 0;
+    t.int_value     = 0;
+    t.int_type      = QCC_INT_INT;
     return t;
 }
 
@@ -223,6 +229,17 @@ qcc_status qcc_convert_run(qcc_convert *cv, const qcc_ptok_list *in,
             return st;
         }
         tok.keyword = kw; /* QCC_KW_NONE except for a keyword token. */
+
+        /* Evaluate an integer constant's value and type (§6.4.4.1). */
+        if (kind == QCC_TOKEN_INTEGER) {
+            st = qcc_eval_integer(tok.spelling, tok.spelling_len, t->source,
+                                  t->offset, cv->diags, &tok.int_value,
+                                  &tok.int_type);
+            if (st != QCC_OK) {
+                return st;
+            }
+        }
+
         st = qcc_token_list_push(out, &tok);
         if (st != QCC_OK) {
             return st;
