@@ -291,6 +291,10 @@ const char *qcc_int_type_name(qcc_int_type type);
 /* Stable C spelling of a floating-constant type ("double", "float", …). */
 const char *qcc_float_type_name(qcc_float_type type);
 
+/* Stable lowercase name of a character/string encoding prefix ("plain", "wide",
+   "char16", "char32", "utf8"). Used by diagnostics and the token dump. */
+const char *qcc_char_encoding_str(qcc_char_encoding enc);
+
 /*
  * Canonical (primary) spelling of a punctuator — "[" for QCC_PUNCT_LBRACKET
  * even if the source wrote "<:". Static string, never NULL for valid input;

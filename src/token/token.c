@@ -66,6 +66,18 @@ const char *qcc_float_type_name(qcc_float_type type)
     return "unknown";
 }
 
+const char *qcc_char_encoding_str(qcc_char_encoding enc)
+{
+    switch (enc) {
+    case QCC_ENC_PLAIN:  return "plain";
+    case QCC_ENC_WIDE:   return "wide";
+    case QCC_ENC_CHAR16: return "char16";
+    case QCC_ENC_CHAR32: return "char32";
+    case QCC_ENC_UTF8:   return "utf8";
+    }
+    return "unknown";
+}
+
 /*
  * Primary spellings, indexed by qcc_punct. The order MUST match the enum in
  * token.h exactly; test_token locks the correspondence down entry by entry so

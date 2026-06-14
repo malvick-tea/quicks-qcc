@@ -105,11 +105,40 @@ static void test_kind_names(void)
                      "unknown", "out-of-range kind is total");
 }
 
+/* The constant-value naming helpers used by diagnostics and the token dump. */
+static void test_value_names(void)
+{
+    QTEST_CHECK_SPAN(qcc_int_type_name(QCC_INT_ULLONG),
+                     strlen(qcc_int_type_name(QCC_INT_ULLONG)),
+                     "unsigned long long", "int type name");
+    QTEST_CHECK_SPAN(qcc_float_type_name(QCC_FLOAT_LDOUBLE),
+                     strlen(qcc_float_type_name(QCC_FLOAT_LDOUBLE)),
+                     "long double", "float type name");
+
+    static const struct {
+        qcc_char_encoding enc;
+        const char       *name;
+    } encs[] = {
+        { QCC_ENC_PLAIN,  "plain" },  { QCC_ENC_WIDE,   "wide" },
+        { QCC_ENC_CHAR16, "char16" }, { QCC_ENC_CHAR32, "char32" },
+        { QCC_ENC_UTF8,   "utf8" },
+    };
+    for (size_t i = 0; i < sizeof(encs) / sizeof(encs[0]); ++i) {
+        QTEST_CHECK_SPAN(qcc_char_encoding_str(encs[i].enc),
+                         strlen(qcc_char_encoding_str(encs[i].enc)),
+                         encs[i].name, "encoding name");
+    }
+    QTEST_CHECK_SPAN(qcc_char_encoding_str((qcc_char_encoding)999),
+                     strlen(qcc_char_encoding_str((qcc_char_encoding)999)),
+                     "unknown", "out-of-range encoding is total");
+}
+
 int main(void)
 {
     test_punct_spellings();
     test_keyword_hits();
     test_keyword_misses();
     test_kind_names();
+    test_value_names();
     return qtest_report("token");
 }
