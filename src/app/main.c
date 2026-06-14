@@ -3,15 +3,18 @@
  *
  * What works today
  *   The front end runs through translation phases 1-7 (lexer, preprocessor,
- *   convert; ADR-0013 pipeline). Two developer-facing modes expose the stages:
- *   `qcc -E <in.c>` preprocesses a translation unit and writes the resulting
- *   text (phase 4 — every §6.10 directive, macro expansion, and `#include`);
- *   `qcc -dump-tokens <in.c>` runs the whole pipeline through `convert` (phases
- *   5-7) and writes the token stream — kinds, evaluated constant values, and
- *   string contents — one token per line, for inspection and bootstrap
- *   differential testing. The later stages (parse, …) land front to back;
- *   without a mode flag, qcc reports that full translation is not implemented
- *   yet rather than pretending to compile.
+ *   convert; ADR-0013 pipeline) and the parser recognises the whole §6.9
+ *   translation unit (ADR-0019/0022/0023/0024). Three developer-facing modes
+ *   expose the stages: `qcc -E <in.c>` preprocesses a translation unit and writes
+ *   the resulting text (phase 4 — every §6.10 directive, macro expansion, and
+ *   `#include`); `qcc -dump-tokens <in.c>` runs the whole pipeline through
+ *   `convert` (phases 5-7) and writes the token stream — kinds, evaluated constant
+ *   values, and string contents — one token per line; `qcc -dump-ast <in.c>`
+ *   parses the translation unit and writes each external declaration's parse tree
+ *   as an S-expression. All three aid inspection and bootstrap differential
+ *   testing. The later stages (semantic analysis, codegen) land front to back;
+ *   without a mode flag, qcc reports that full translation is not implemented yet
+ *   rather than pretending to compile.
  *
  * Exit codes (stable contract, shared shape with qas/qld)
  *   0  success
@@ -26,13 +29,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ast/ast.h"
 #include "convert/convert.h"
 #include "diag/diag.h"
+#include "parser/parser.h"
 #include "pp/pp.h"
 #include "pp/render.h"
 #include "source/source.h"
 #include "status/status.h"
+#include "symtab/symtab.h"
 #include "token/token.h"
+#include "type/type.h"
 
 /* Exit codes, named so call sites read clearly (no magic numbers). */
 enum {
@@ -82,6 +89,8 @@ static void print_usage(FILE *out, const char *prog)
             "                             Preprocess <in.c> (translation phase 4)\n"
             "  %s -dump-tokens [...] <in.c>\n"
             "                             Dump the token stream (phases 5-7)\n"
+            "  %s -dump-ast [...] <in.c>  Dump the parse tree (the §6.9 translation\n"
+            "                             unit) as S-expressions, one per line\n"
             "  %s [-o <out.s>] <in.c>     Compile <in.c> to x86-64 assembly (Intel\n"
             "                             syntax, for qas) — not yet implemented\n"
             "  %s --help                  Show this help\n"
@@ -90,10 +99,11 @@ static void print_usage(FILE *out, const char *prog)
             "Options:\n"
             "  -E            Preprocess only; write the result to stdout (or -o).\n"
             "  -dump-tokens  Run the full front end and print one token per line.\n"
+            "  -dump-ast     Parse the translation unit and print its syntax tree.\n"
             "  -I <dir>      Add <dir> to the angle (<...>) include search path.\n"
             "  -iquote <dir> Add <dir> to the quote (\"...\") include search path.\n"
             "  -o <out>      Write output to <out> instead of stdout / <in>.s.\n",
-            prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog);
 }
 
 /* Render the preprocessed token stream to `output_path` (NULL => stdout).
@@ -397,6 +407,170 @@ static int run_dump(const char *input_path, const char *output_path,
     return exit_code;
 }
 
+/* Write one external declaration's S-expression dump line. Returns 1 on success,
+   0 on a dump (out-of-memory) failure (message already printed). */
+static int write_ast_decl(FILE *outf, const qcc_extern_decl *ed)
+{
+    char  *text = NULL;
+    size_t len  = 0;
+    if (qcc_extern_decl_dump(ed, &text, &len) != QCC_OK) {
+        fprintf(stderr, "qcc: error: out of memory rendering the syntax tree\n");
+        return 0;
+    }
+    if (len > 0) {
+        fwrite(text, 1, len, outf);
+    }
+    fputc('\n', outf);
+    free(text);
+    return 1;
+}
+
+/* Parse the translation unit in `toks` and write each external declaration's
+   parse tree as an S-expression to `output_path` (NULL => stdout). Parse errors go
+   to `diags` (reported by the caller). Returns a QCC_EXIT_* code. */
+static int parse_and_dump_ast(const qcc_token_list *toks, const char *output_path,
+                              qcc_diag_sink *diags)
+{
+    FILE *outf      = stdout;
+    int   close_out = 0;
+    if (output_path != NULL) {
+        outf = fopen(output_path, "wb");
+        if (outf == NULL) {
+            fprintf(stderr, "qcc: error: cannot open '%s' for writing\n",
+                    output_path);
+            return QCC_EXIT_ERROR;
+        }
+        close_out = 1;
+    }
+
+    qcc_type_ctx tc;
+    qcc_type_ctx_init(&tc);
+    qcc_symtab sym;
+    qcc_symtab_init(&sym);
+    qcc_ast ast;
+    qcc_ast_init(&ast);
+    qcc_parser parser;
+    qcc_parser_init(&parser, toks->items, toks->count, &ast, &tc, &sym, diags);
+
+    int exit_code = QCC_EXIT_OK;
+    while (!qcc_parser_at_end(&parser)) {
+        qcc_extern_decl ed;
+        qcc_status      pst = qcc_parse_external_declaration(&parser, &ed);
+        if (pst != QCC_OK) {
+            /* A QCC_ERR_PARSE diagnostic is already in the sink; OOM is not. */
+            if (pst == QCC_ERR_OUT_OF_MEMORY) {
+                fprintf(stderr, "qcc: error: out of memory parsing\n");
+            }
+            exit_code = QCC_EXIT_ERROR;
+            break;
+        }
+        if (!write_ast_decl(outf, &ed)) {
+            exit_code = QCC_EXIT_ERROR;
+            break;
+        }
+    }
+
+    if (exit_code == QCC_EXIT_OK && ferror(outf)) {
+        fprintf(stderr, "qcc: error: writing output failed\n");
+        exit_code = QCC_EXIT_ERROR;
+    }
+    if (close_out) {
+        if (fclose(outf) != 0) {
+            exit_code = QCC_EXIT_ERROR;
+        }
+    } else {
+        fflush(outf);
+    }
+
+    qcc_ast_dispose(&ast);
+    qcc_symtab_dispose(&sym);
+    qcc_type_ctx_dispose(&tc);
+    return exit_code;
+}
+
+/* The `qcc -dump-ast` path: run the front end (phases 1-7), parse the translation
+   unit (§6.9), and write each external declaration's parse tree as a deterministic
+   S-expression — one per line — for inspection and bootstrap differential testing.
+   Mirrors run_dump, carrying the stream one subsystem further (the parser). */
+static int run_dump_ast(const char *input_path, const char *output_path,
+                        const dirlist *angle, const dirlist *quote)
+{
+    qcc_source source;
+    qcc_status st = qcc_source_load_file(input_path, &source);
+    if (st != QCC_OK) {
+        fprintf(stderr, "qcc: error: cannot read '%s': %s\n", input_path,
+                qcc_status_str(st));
+        return QCC_EXIT_ERROR;
+    }
+
+    qcc_diag_sink diags;
+    qcc_diag_sink_init(&diags);
+
+    qcc_pp pp;
+    st = qcc_pp_init(&pp, &diags);
+    if (st != QCC_OK) {
+        fprintf(stderr, "qcc: error: %s\n", qcc_status_str(st));
+        qcc_diag_sink_dispose(&diags);
+        qcc_source_dispose(&source);
+        return QCC_EXIT_ERROR;
+    }
+
+    int cfg_ok = 1;
+    for (size_t i = 0; i < angle->count && cfg_ok; ++i) {
+        cfg_ok = (qcc_pp_add_include_dir(&pp, angle->items[i]) == QCC_OK);
+    }
+    for (size_t i = 0; i < quote->count && cfg_ok; ++i) {
+        cfg_ok = (qcc_pp_add_quote_include_dir(&pp, quote->items[i]) == QCC_OK);
+    }
+
+    int exit_code = QCC_EXIT_OK;
+    if (!cfg_ok) {
+        fprintf(stderr, "qcc: error: out of memory configuring include path\n");
+        exit_code = QCC_EXIT_ERROR;
+    } else {
+        qcc_ptok_list pt;
+        qcc_ptok_list_init(&pt);
+        st = qcc_pp_run(&pp, &source, &pt);
+        if (st != QCC_OK) {
+            fprintf(stderr, "qcc: error: preprocessing failed: %s\n",
+                    qcc_status_str(st));
+            exit_code = QCC_EXIT_ERROR;
+        } else {
+            qcc_convert cv;
+            st = qcc_convert_init(&cv, &diags);
+            if (st != QCC_OK) {
+                fprintf(stderr, "qcc: error: %s\n", qcc_status_str(st));
+                exit_code = QCC_EXIT_ERROR;
+            } else {
+                qcc_token_list toks;
+                qcc_token_list_init(&toks);
+                st = qcc_convert_run(&cv, &pt, &toks);
+                if (st != QCC_OK) {
+                    fprintf(stderr, "qcc: error: token conversion failed: %s\n",
+                            qcc_status_str(st));
+                    exit_code = QCC_EXIT_ERROR;
+                } else {
+                    exit_code = parse_and_dump_ast(&toks, output_path, &diags);
+                }
+                qcc_token_list_dispose(&toks);
+                qcc_convert_dispose(&cv);
+            }
+        }
+        qcc_ptok_list_dispose(&pt);
+    }
+
+    qcc_diag_sink_print(&diags, stderr);
+    if (exit_code == QCC_EXIT_OK &&
+        qcc_diag_severity_count(&diags, QCC_DIAG_ERROR) > 0) {
+        exit_code = QCC_EXIT_ERROR;
+    }
+
+    qcc_pp_dispose(&pp);
+    qcc_diag_sink_dispose(&diags);
+    qcc_source_dispose(&source);
+    return exit_code;
+}
+
 /* The full-compile path: validate the input exists, then report honestly that
    translation past phase 4 is not implemented yet. */
 static int report_not_implemented(const char *input_path, const char *output_path)
@@ -425,11 +599,12 @@ static int report_not_implemented(const char *input_path, const char *output_pat
 
 int main(int argc, char **argv)
 {
-    const char *input_path  = NULL;
-    const char *output_path = NULL;
-    int         flag_E      = 0;
-    int         flag_dump   = 0;
-    dirlist     angle       = { NULL, 0, 0 };
+    const char *input_path   = NULL;
+    const char *output_path  = NULL;
+    int         flag_E       = 0;
+    int         flag_dump    = 0;
+    int         flag_dumpast = 0;
+    dirlist     angle        = { NULL, 0, 0 };
     dirlist     quote       = { NULL, 0, 0 };
     int         result      = QCC_EXIT_OK;
 
@@ -455,6 +630,10 @@ int main(int argc, char **argv)
         }
         if (strcmp(arg, "-dump-tokens") == 0) {
             flag_dump = 1;
+            continue;
+        }
+        if (strcmp(arg, "-dump-ast") == 0) {
+            flag_dumpast = 1;
             continue;
         }
         if (strcmp(arg, "-o") == 0) {
@@ -527,14 +706,16 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    if (flag_E && flag_dump) {
-        fprintf(stderr, "qcc: error: -E and -dump-tokens are mutually "
-                        "exclusive\n");
+    if (flag_E + flag_dump + flag_dumpast > 1) {
+        fprintf(stderr, "qcc: error: -E, -dump-tokens, and -dump-ast are "
+                        "mutually exclusive\n");
         result = QCC_EXIT_USAGE;
         goto cleanup;
     }
 
-    if (flag_dump) {
+    if (flag_dumpast) {
+        result = run_dump_ast(input_path, output_path, &angle, &quote);
+    } else if (flag_dump) {
         result = run_dump(input_path, output_path, &angle, &quote);
     } else if (flag_E) {
         result = run_preprocess(input_path, output_path, &angle, &quote);
