@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "consteval/consteval.h"
+
 qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
                            size_t count, qcc_ast *ast, qcc_type_ctx *types,
                            qcc_symtab *syms, qcc_diag_sink *diags)
@@ -1006,10 +1008,14 @@ static const qcc_type *parse_type_suffix(qcc_parser *p, const qcc_type *type,
             if (sz == NULL) {
                 return NULL;
             }
-            if (sz->kind == QCC_EXPR_INT_CONST) {
-                len      = sz->tok.int_value;
+            /* §6.7.6.2: a non-VLA bound is an integer constant expression (§6.6).
+               Evaluate it; a non-constant bound stays incomplete (VLAs are not
+               supported yet). */
+            qcc_const_value cv;
+            if (qcc_eval_const_int(sz, &cv) == QCC_OK) {
+                len      = cv.value;
                 complete = 1;
-            } /* A non-constant bound (VLA) is treated as incomplete for now. */
+            }
         }
         if (!expect_punct(p, QCC_PUNCT_RBRACKET,
                           "expected ']' in array declarator")) {

@@ -155,6 +155,10 @@ static void test_pointers_arrays(void)
     chk("int a[3];", "a: array[3] of int");
     chk("int a[2][3];", "a: array[2] of array[3] of int");
     chk("char *argv[];", "argv: array[] of pointer to char");
+    /* A bound is an integer constant expression (§6.7.6.2, §6.6), now evaluated. */
+    chk("int a[2 + 3];", "a: array[5] of int");
+    chk("int a[1 << 4];", "a: array[16] of int");
+    chk("int a[sizeof(int)];", "a: array[4] of int");
 }
 
 static void test_functions(void)

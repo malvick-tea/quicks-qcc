@@ -31,6 +31,7 @@ qcc_add_test(symtab)
 qcc_add_test(decl)
 qcc_add_test(stmt)
 qcc_add_test(extdef)
+qcc_add_test(consteval)
 
 # The #include suite needs real header files. Generate them into the build tree
 # so the test is hermetic: it depends on these fixtures and their directories

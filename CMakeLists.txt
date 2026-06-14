@@ -62,6 +62,7 @@ add_library(qcc_core STATIC
     src/parser/parser.c
     src/type/type.c
     src/symtab/symtab.c
+    src/consteval/consteval.c
 )
 
 # Modules include each other as "module/header.h"; src/ is the single include
