@@ -37,18 +37,24 @@
 #include "ast/ast.h"
 #include "diag/diag.h"
 #include "status/status.h"
+#include "symtab/symtab.h"
 #include "token/token.h"
+#include "type/type.h"
 
 /*
  * The parser state. Treat the fields as private; use the functions. `tokens`
  * points at an EOF-terminated array of `count` tokens (a qcc_token_list's items);
- * `pos` is the cursor. `ast` and `diags` are borrowed and must outlive the parser.
+ * `pos` is the cursor. `ast`, `diags`, `types`, and `syms` are borrowed and must
+ * outlive the parser. `types`/`syms` may be NULL for expression-only use (Unit 1);
+ * declaration parsing requires them.
  */
 typedef struct qcc_parser {
     const qcc_token *tokens;
     size_t           count;
     size_t           pos;
     qcc_ast         *ast;     /* Borrowed; nodes are allocated from it.        */
+    qcc_type_ctx    *types;   /* Borrowed; types are built here (decls).       */
+    qcc_symtab      *syms;    /* Borrowed; names registered/resolved here.     */
     qcc_diag_sink   *diags;   /* Borrowed; syntax errors are reported here.    */
     int              had_error; /* A syntax error was diagnosed.               */
     int              oom;       /* A node allocation failed (hard fault).      */
@@ -56,11 +62,13 @@ typedef struct qcc_parser {
 
 /*
  * Initialize a parser over `tokens[0..count)` (EOF-terminated; count >= 1),
- * building into `ast` and reporting to `diags` (both non-NULL, must outlive it).
+ * building into `ast` and reporting to `diags` (all non-NULL, must outlive it).
+ * `types` and `syms` back declaration parsing; pass NULL for expression-only use.
  * Returns QCC_OK or QCC_ERR_INVALID_ARGUMENT.
  */
 qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
-                           size_t count, qcc_ast *ast, qcc_diag_sink *diags);
+                           size_t count, qcc_ast *ast, qcc_type_ctx *types,
+                           qcc_symtab *syms, qcc_diag_sink *diags);
 
 /*
  * Parse one expression (§6.5.17, the comma operator at the top) starting at the
@@ -70,6 +78,28 @@ qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
  * allocation failure it is QCC_ERR_OUT_OF_MEMORY. *out is NULL unless QCC_OK.
  */
 qcc_status qcc_parse_expression(qcc_parser *parser, qcc_expr **out);
+
+/*
+ * Parse one declaration (§6.7) at the cursor — declaration-specifiers, an
+ * init-declarator list, and the closing ';' — appending one qcc_decl per declared
+ * name to `out` and registering each name in the symbol table (a typedef as a
+ * typedef-name, others as object/function). Requires the parser to have been given
+ * a type context and symbol table. On success returns QCC_OK; on a syntax error a
+ * diagnostic was emitted and the return is QCC_ERR_PARSE; QCC_ERR_OUT_OF_MEMORY on
+ * a hard fault; QCC_ERR_INVALID_ARGUMENT if no type ctx/symtab was provided.
+ */
+qcc_status qcc_parse_declaration(qcc_parser *parser, qcc_decl_list *out);
+
+/*
+ * Parse a type-name (§6.7.7) — specifier-qualifier-list and an optional abstract
+ * declarator — at the cursor, leaving the cursor after it. *out receives the type.
+ * Returns QCC_OK, QCC_ERR_PARSE, QCC_ERR_OUT_OF_MEMORY, or QCC_ERR_INVALID_ARGUMENT.
+ */
+qcc_status qcc_parse_type_name(qcc_parser *parser, const qcc_type **out);
+
+/* Whether the cursor looks at the start of a declaration (a declaration-specifier
+   keyword or a visible typedef-name) — the §6.7.8 declaration-vs-expression test. */
+int qcc_parser_at_declaration(const qcc_parser *parser);
 
 /* Whether the cursor is at the end-of-stream token (QCC_TOKEN_EOF). */
 int qcc_parser_at_end(const qcc_parser *parser);

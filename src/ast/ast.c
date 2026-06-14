@@ -241,6 +241,56 @@ const char *qcc_expr_kind_name(qcc_expr_kind kind)
     return "unknown";
 }
 
+void qcc_decl_list_init(qcc_decl_list *list)
+{
+    list->items    = NULL;
+    list->count    = 0;
+    list->capacity = 0;
+}
+
+void qcc_decl_list_dispose(qcc_decl_list *list)
+{
+    if (list == NULL) {
+        return;
+    }
+    free(list->items);
+    list->items    = NULL;
+    list->count    = 0;
+    list->capacity = 0;
+}
+
+qcc_status qcc_decl_list_push(qcc_decl_list *list, const qcc_decl *decl)
+{
+    if (list == NULL || decl == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    if (list->count == list->capacity) {
+        size_t    ncap  = (list->capacity == 0) ? 8u : list->capacity * 2u;
+        qcc_decl *grown = (qcc_decl *)realloc(list->items, ncap * sizeof(*grown));
+        if (grown == NULL) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        list->items    = grown;
+        list->capacity = ncap;
+    }
+    list->items[list->count++] = *decl;
+    return QCC_OK;
+}
+
+const char *qcc_storage_class_name(qcc_storage_class sc)
+{
+    switch (sc) {
+    case QCC_SC_NONE:         return "";
+    case QCC_SC_TYPEDEF:      return "typedef";
+    case QCC_SC_EXTERN:       return "extern";
+    case QCC_SC_STATIC:       return "static";
+    case QCC_SC_THREAD_LOCAL: return "_Thread_local";
+    case QCC_SC_AUTO:         return "auto";
+    case QCC_SC_REGISTER:     return "register";
+    }
+    return "unknown";
+}
+
 /* A growable text buffer for the dumper (seed allocator, transient). */
 typedef struct strbuf {
     char  *data;

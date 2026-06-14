@@ -12,9 +12,11 @@
 #include "parser/parser.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
-                           size_t count, qcc_ast *ast, qcc_diag_sink *diags)
+                           size_t count, qcc_ast *ast, qcc_type_ctx *types,
+                           qcc_symtab *syms, qcc_diag_sink *diags)
 {
     if (parser == NULL || tokens == NULL || count == 0 || ast == NULL ||
         diags == NULL) {
@@ -24,6 +26,8 @@ qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
     parser->count     = count;
     parser->pos       = 0;
     parser->ast       = ast;
+    parser->types     = types; /* May be NULL for expression-only use. */
+    parser->syms      = syms;
     parser->diags     = diags;
     parser->had_error = 0;
     parser->oom       = 0;
@@ -447,4 +451,638 @@ qcc_status qcc_parse_expression(qcc_parser *p, qcc_expr **out)
     }
     *out = e;
     return QCC_OK;
+}
+
+/*
+ * Declarations (§6.7). The declaration parser turns declaration-specifiers + a
+ * declarator into a qcc_type and a name, building the type in the parser's
+ * qcc_type_ctx and registering the name in its qcc_symtab. Declarator binding is
+ * inside-out (§6.7.6): pointers prepend, array/function suffixes append, and a
+ * parenthesised (nested) declarator is parsed by the standard two-pass method —
+ * skip the inner declarator to apply the trailing suffixes to the type, then
+ * re-parse the inner declarator against that suffixed type. See ADR-0022.
+ */
+
+/* Accumulated declaration-specifiers (§6.7.2): storage class, qualifier and
+   function-specifier flags, and a count of each arithmetic type-specifier keyword
+   (the keywords are unordered, §6.7.2 ¶2), or a typedef-name / tagged type. */
+typedef struct declspec {
+    qcc_storage_class storage;
+    int               storage_set;
+    unsigned          func_spec;
+    unsigned          quals;
+    int               c_void, c_bool, c_char, c_short, c_int;
+    int               c_long, c_signed, c_unsigned, c_float, c_double;
+    int               type_specifier_count;
+    const qcc_type   *named_type; /* a typedef-name's type or a struct/union/enum */
+    int               has_named_type;
+} declspec;
+
+static const qcc_type *parse_declarator(qcc_parser *p, const qcc_type *base,
+                                        int abstract, const qcc_token **out_name);
+static const qcc_type *parse_type_suffix(qcc_parser *p, const qcc_type *type,
+                                         int abstract);
+static void parse_declaration_specifiers(qcc_parser *p, declspec *ds);
+static const qcc_type *ds_base_type(qcc_parser *p, const declspec *ds,
+                                    const qcc_token *loc);
+
+static int at_keyword(const qcc_parser *p, qcc_keyword kw)
+{
+    const qcc_token *t = peek(p);
+    return t->kind == QCC_TOKEN_KEYWORD && t->keyword == kw;
+}
+
+/* Is `kw` a declaration-specifier keyword (storage/type/qualifier/function)? */
+static int is_decl_specifier_keyword(qcc_keyword kw)
+{
+    switch (kw) {
+    case QCC_KW_TYPEDEF: case QCC_KW_EXTERN: case QCC_KW_STATIC:
+    case QCC_KW_AUTO:    case QCC_KW_REGISTER: case QCC_KW_THREAD_LOCAL:
+    case QCC_KW_CONST:   case QCC_KW_VOLATILE: case QCC_KW_RESTRICT:
+    case QCC_KW_ATOMIC:  case QCC_KW_INLINE:   case QCC_KW_NORETURN:
+    case QCC_KW_VOID:    case QCC_KW_CHAR:     case QCC_KW_SHORT:
+    case QCC_KW_INT:     case QCC_KW_LONG:     case QCC_KW_FLOAT:
+    case QCC_KW_DOUBLE:  case QCC_KW_SIGNED:   case QCC_KW_UNSIGNED:
+    case QCC_KW_BOOL:    case QCC_KW_COMPLEX:  case QCC_KW_IMAGINARY:
+    case QCC_KW_STRUCT:  case QCC_KW_UNION:    case QCC_KW_ENUM:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static qcc_storage_class map_storage(qcc_keyword kw)
+{
+    switch (kw) {
+    case QCC_KW_TYPEDEF:      return QCC_SC_TYPEDEF;
+    case QCC_KW_EXTERN:       return QCC_SC_EXTERN;
+    case QCC_KW_STATIC:       return QCC_SC_STATIC;
+    case QCC_KW_THREAD_LOCAL: return QCC_SC_THREAD_LOCAL;
+    case QCC_KW_AUTO:         return QCC_SC_AUTO;
+    case QCC_KW_REGISTER:     return QCC_SC_REGISTER;
+    default:                  return QCC_SC_NONE;
+    }
+}
+
+/* Consume a run of type-qualifier keywords (§6.7.3), returning their bitmask. */
+static unsigned parse_type_qualifier_list(qcc_parser *p)
+{
+    unsigned q = 0;
+    for (;;) {
+        const qcc_token *t = peek(p);
+        if (t->kind != QCC_TOKEN_KEYWORD) {
+            break;
+        }
+        if (t->keyword == QCC_KW_CONST) {
+            q |= QCC_QUAL_CONST;
+        } else if (t->keyword == QCC_KW_VOLATILE) {
+            q |= QCC_QUAL_VOLATILE;
+        } else if (t->keyword == QCC_KW_RESTRICT) {
+            q |= QCC_QUAL_RESTRICT;
+        } else if (t->keyword == QCC_KW_ATOMIC) {
+            q |= QCC_QUAL_ATOMIC;
+        } else {
+            break;
+        }
+        advance(p);
+    }
+    return q;
+}
+
+/* Skip a balanced { } block (cursor at '{'); used to recover past an unsupported
+   struct/union/enum definition. */
+static void skip_balanced_braces(qcc_parser *p)
+{
+    if (!at_punct(p, QCC_PUNCT_LBRACE)) {
+        return;
+    }
+    int depth = 0;
+    for (;;) {
+        const qcc_token *t = peek(p);
+        if (t->kind == QCC_TOKEN_EOF) {
+            return;
+        }
+        if (t->kind == QCC_TOKEN_PUNCT && t->punct == QCC_PUNCT_LBRACE) {
+            ++depth;
+        } else if (t->kind == QCC_TOKEN_PUNCT && t->punct == QCC_PUNCT_RBRACE) {
+            --depth;
+            advance(p);
+            if (depth == 0) {
+                return;
+            }
+            continue;
+        }
+        advance(p);
+    }
+}
+
+/* Map the arithmetic type-specifier multiset to a basic type (§6.7.2 ¶2). */
+static const qcc_type *base_from_counts(qcc_parser *p, const declspec *ds,
+                                        const qcc_token *loc)
+{
+    int           u = ds->c_unsigned > 0;
+    int           s = ds->c_signed > 0;
+    qcc_type_kind k;
+
+    if (ds->c_void) {
+        k = QCC_TYPE_VOID;
+    } else if (ds->c_bool) {
+        k = QCC_TYPE_BOOL;
+    } else if (ds->c_double) {
+        k = (ds->c_long >= 1) ? QCC_TYPE_LDOUBLE : QCC_TYPE_DOUBLE;
+    } else if (ds->c_float) {
+        k = QCC_TYPE_FLOAT;
+    } else if (ds->c_char) {
+        k = s ? QCC_TYPE_SCHAR : (u ? QCC_TYPE_UCHAR : QCC_TYPE_CHAR);
+    } else if (ds->c_short) {
+        k = u ? QCC_TYPE_USHORT : QCC_TYPE_SHORT;
+    } else if (ds->c_long >= 2) {
+        k = u ? QCC_TYPE_ULLONG : QCC_TYPE_LLONG;
+    } else if (ds->c_long == 1) {
+        k = u ? QCC_TYPE_ULONG : QCC_TYPE_LONG;
+    } else {
+        k = u ? QCC_TYPE_UINT : QCC_TYPE_INT; /* int / signed / unsigned [int] */
+    }
+
+    if ((u && s) || ds->c_int > 1 || ds->c_long > 2 || ds->c_char > 1 ||
+        ds->c_short > 1) {
+        parse_error(p, loc, "invalid combination of type specifiers");
+    }
+
+    const qcc_type *t = qcc_type_basic(p->types, k);
+    if (t == NULL) {
+        p->oom = 1;
+    }
+    return t;
+}
+
+/* The base type a declaration-specifier list denotes, qualifiers applied. */
+static const qcc_type *ds_base_type(qcc_parser *p, const declspec *ds,
+                                    const qcc_token *loc)
+{
+    const qcc_type *base;
+    if (ds->has_named_type) {
+        base = ds->named_type;
+    } else if (ds->type_specifier_count == 0) {
+        parse_error(p, loc, "expected a type specifier");
+        base = qcc_type_basic(p->types, QCC_TYPE_INT); /* recover as int */
+    } else {
+        base = base_from_counts(p, ds, loc);
+    }
+    if (base == NULL) {
+        if (!p->oom) {
+            p->oom = 1; /* qcc_type_basic failed. */
+        }
+        return NULL;
+    }
+    if (ds->quals != 0) {
+        const qcc_type *q = qcc_type_qualified(p->types, base, ds->quals);
+        if (q == NULL) {
+            p->oom = 1;
+            return NULL;
+        }
+        base = q;
+    }
+    return base;
+}
+
+static void parse_declaration_specifiers(qcc_parser *p, declspec *ds)
+{
+    memset(ds, 0, sizeof(*ds));
+    for (;;) {
+        const qcc_token *t = peek(p);
+        if (t->kind == QCC_TOKEN_KEYWORD) {
+            qcc_keyword kw = t->keyword;
+            switch (kw) {
+            case QCC_KW_TYPEDEF: case QCC_KW_EXTERN: case QCC_KW_STATIC:
+            case QCC_KW_AUTO: case QCC_KW_REGISTER: case QCC_KW_THREAD_LOCAL: {
+                qcc_storage_class sc = map_storage(kw);
+                if (ds->storage_set && ds->storage != sc &&
+                    ds->storage != QCC_SC_THREAD_LOCAL &&
+                    sc != QCC_SC_THREAD_LOCAL) {
+                    parse_error(p, t, "multiple storage-class specifiers");
+                }
+                if (sc != QCC_SC_THREAD_LOCAL || !ds->storage_set) {
+                    ds->storage = sc;
+                }
+                ds->storage_set = 1;
+                advance(p);
+                continue;
+            }
+            case QCC_KW_CONST:    ds->quals |= QCC_QUAL_CONST;    advance(p); continue;
+            case QCC_KW_VOLATILE: ds->quals |= QCC_QUAL_VOLATILE; advance(p); continue;
+            case QCC_KW_RESTRICT: ds->quals |= QCC_QUAL_RESTRICT; advance(p); continue;
+            case QCC_KW_ATOMIC:   ds->quals |= QCC_QUAL_ATOMIC;   advance(p); continue;
+            case QCC_KW_INLINE:   ds->func_spec |= QCC_FS_INLINE;   advance(p); continue;
+            case QCC_KW_NORETURN: ds->func_spec |= QCC_FS_NORETURN; advance(p); continue;
+            case QCC_KW_VOID:  ds->c_void++;  ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_BOOL:  ds->c_bool++;  ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_CHAR:  ds->c_char++;  ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_SHORT: ds->c_short++; ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_INT:   ds->c_int++;   ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_LONG:  ds->c_long++;  ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_FLOAT: ds->c_float++; ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_DOUBLE: ds->c_double++; ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_SIGNED:   ds->c_signed++;   ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_UNSIGNED: ds->c_unsigned++; ds->type_specifier_count++; advance(p); continue;
+            case QCC_KW_COMPLEX: case QCC_KW_IMAGINARY:
+                parse_error(p, t, "_Complex/_Imaginary are not supported yet");
+                advance(p);
+                continue;
+            case QCC_KW_STRUCT: case QCC_KW_UNION: case QCC_KW_ENUM: {
+                qcc_type_kind tk = (kw == QCC_KW_STRUCT) ? QCC_TYPE_STRUCT
+                                 : (kw == QCC_KW_UNION)  ? QCC_TYPE_UNION
+                                                         : QCC_TYPE_ENUM;
+                advance(p);
+                const qcc_token *tag = NULL;
+                if (peek(p)->kind == QCC_TOKEN_IDENTIFIER) {
+                    tag = peek(p);
+                    advance(p);
+                }
+                if (at_punct(p, QCC_PUNCT_LBRACE)) {
+                    parse_error(p, peek(p),
+                                "struct/union/enum definitions are not supported yet");
+                    skip_balanced_braces(p);
+                }
+                const qcc_type *tt = qcc_type_tagged(
+                    p->types, tk, tag ? tag->spelling : NULL,
+                    tag ? tag->spelling_len : 0, 0);
+                if (tt == NULL) {
+                    p->oom = 1;
+                    return;
+                }
+                ds->named_type     = tt;
+                ds->has_named_type = 1;
+                ds->type_specifier_count++;
+                continue;
+            }
+            default:
+                return; /* Not a specifier keyword: the declarator begins. */
+            }
+        } else if (t->kind == QCC_TOKEN_IDENTIFIER) {
+            /* A typedef-name is a type specifier only if no type is set yet
+               (otherwise it is the declared name). */
+            if (!ds->has_named_type && ds->type_specifier_count == 0 &&
+                p->syms != NULL &&
+                qcc_symtab_is_typedef_name(p->syms, t->spelling,
+                                           t->spelling_len)) {
+                const qcc_symbol *sym = qcc_symtab_lookup(
+                    p->syms, t->spelling, t->spelling_len, QCC_NS_ORDINARY);
+                ds->named_type     = sym->type;
+                ds->has_named_type = 1;
+                ds->type_specifier_count++;
+                advance(p);
+                continue;
+            }
+            return;
+        } else {
+            return;
+        }
+    }
+}
+
+/* §6.7.6.3: a parameter of array/function type is adjusted to a pointer. */
+static const qcc_type *adjust_param_type(qcc_parser *p, const qcc_type *t)
+{
+    if (t->kind == QCC_TYPE_ARRAY) {
+        const qcc_type *pt = qcc_type_pointer(p->types, t->element, 0);
+        if (pt == NULL) {
+            p->oom = 1;
+        }
+        return pt;
+    }
+    if (t->kind == QCC_TYPE_FUNCTION) {
+        const qcc_type *pt = qcc_type_pointer(p->types, t, 0);
+        if (pt == NULL) {
+            p->oom = 1;
+        }
+        return pt;
+    }
+    return t;
+}
+
+/* A function declarator's parameter list (§6.7.6.3); '(' already consumed. */
+static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
+{
+    const qcc_type **params = NULL;
+    size_t           n      = 0;
+    size_t           cap    = 0;
+    int              variadic = 0;
+
+    int void_only = (at_keyword(p, QCC_KW_VOID) && p->pos + 1 < p->count &&
+                     p->tokens[p->pos + 1].kind == QCC_TOKEN_PUNCT &&
+                     p->tokens[p->pos + 1].punct == QCC_PUNCT_RPAREN);
+
+    if (at_punct(p, QCC_PUNCT_RPAREN)) {
+        advance(p); /* () — no parameter information. */
+    } else if (void_only) {
+        advance(p); /* void */
+        advance(p); /* )    */
+    } else {
+        for (;;) {
+            if (at_punct(p, QCC_PUNCT_ELLIPSIS)) {
+                advance(p);
+                variadic = 1;
+                break;
+            }
+            const qcc_token *ploc = peek(p);
+            declspec         ds;
+            parse_declaration_specifiers(p, &ds);
+            if (p->oom) {
+                free(params);
+                return NULL;
+            }
+            const qcc_type *pbase = ds_base_type(p, &ds, ploc);
+            if (pbase == NULL) {
+                free(params);
+                return NULL;
+            }
+            const qcc_token *pname = NULL;
+            const qcc_type  *pt = parse_declarator(p, pbase, 1, &pname);
+            if (pt == NULL) {
+                free(params);
+                return NULL;
+            }
+            pt = adjust_param_type(p, pt);
+            if (pt == NULL) {
+                free(params);
+                return NULL;
+            }
+            if (n == cap) {
+                size_t           ncap  = (cap == 0) ? 4u : cap * 2u;
+                const qcc_type **grown = (const qcc_type **)realloc(
+                    params, ncap * sizeof(*grown));
+                if (grown == NULL) {
+                    free(params);
+                    p->oom = 1;
+                    return NULL;
+                }
+                params = grown;
+                cap    = ncap;
+            }
+            params[n++] = pt;
+            if (at_punct(p, QCC_PUNCT_COMMA)) {
+                advance(p);
+                continue;
+            }
+            break;
+        }
+        if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after parameters")) {
+            free(params);
+            return NULL;
+        }
+    }
+
+    const qcc_type *ft = qcc_type_function(p->types, ret, params, n, variadic);
+    free(params);
+    if (ft == NULL) {
+        p->oom = 1;
+    }
+    return ft;
+}
+
+/* Array/function suffixes of a (direct) declarator. Recurses so the leftmost
+   suffix binds outermost (§6.7.6: `a[2][3]` is array[2] of array[3]). */
+static const qcc_type *parse_type_suffix(qcc_parser *p, const qcc_type *type,
+                                         int abstract)
+{
+    if (at_punct(p, QCC_PUNCT_LPAREN)) {
+        advance(p);
+        return parse_func_params(p, type);
+    }
+    if (at_punct(p, QCC_PUNCT_LBRACKET)) {
+        advance(p);
+        uint64_t len      = 0;
+        int      complete = 0;
+        if (!at_punct(p, QCC_PUNCT_RBRACKET)) {
+            qcc_expr *sz = parse_assignment(p);
+            if (sz == NULL) {
+                return NULL;
+            }
+            if (sz->kind == QCC_EXPR_INT_CONST) {
+                len      = sz->tok.int_value;
+                complete = 1;
+            } /* A non-constant bound (VLA) is treated as incomplete for now. */
+        }
+        if (!expect_punct(p, QCC_PUNCT_RBRACKET,
+                          "expected ']' in array declarator")) {
+            return NULL;
+        }
+        const qcc_type *inner = parse_type_suffix(p, type, abstract);
+        if (inner == NULL) {
+            return NULL;
+        }
+        const qcc_type *arr = qcc_type_array(p->types, inner, len, complete);
+        if (arr == NULL) {
+            p->oom = 1;
+        }
+        return arr;
+    }
+    return type;
+}
+
+/* direct-declarator (§6.7.6): an identifier (or, when abstract, none), or a
+   parenthesised declarator, followed by array/function suffixes. */
+static const qcc_type *parse_direct_declarator(qcc_parser *p, const qcc_type *type,
+                                               int abstract,
+                                               const qcc_token **out_name)
+{
+    int nested = 0;
+    if (at_punct(p, QCC_PUNCT_LPAREN)) {
+        if (!abstract) {
+            nested = 1; /* Concrete: '(' here always groups a declarator. */
+        } else if (p->pos + 1 < p->count) {
+            /* Abstract: '(' groups only if a declarator (not a param list)
+               follows; a param list begins with a specifier or ')'. */
+            const qcc_token *nx = &p->tokens[p->pos + 1];
+            nested = (nx->kind == QCC_TOKEN_PUNCT &&
+                      (nx->punct == QCC_PUNCT_STAR ||
+                       nx->punct == QCC_PUNCT_LPAREN ||
+                       nx->punct == QCC_PUNCT_LBRACKET));
+        }
+    }
+
+    if (nested) {
+        size_t start = p->pos; /* at '(' */
+        advance(p);
+        const qcc_token *dummy = NULL;
+        if (parse_declarator(p, type, abstract, &dummy) == NULL) {
+            return NULL; /* skip pass; error already recorded */
+        }
+        if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' in declarator")) {
+            return NULL;
+        }
+        const qcc_type *suffixed = parse_type_suffix(p, type, abstract);
+        if (suffixed == NULL) {
+            return NULL;
+        }
+        size_t end = p->pos;
+        p->pos     = start + 1; /* re-parse the inner declarator with the real type */
+        const qcc_type *result = parse_declarator(p, suffixed, abstract, out_name);
+        if (result == NULL) {
+            return NULL;
+        }
+        p->pos = end;
+        return result;
+    }
+
+    if (peek(p)->kind == QCC_TOKEN_IDENTIFIER) {
+        if (out_name != NULL) {
+            *out_name = peek(p);
+        }
+        advance(p);
+    } else if (!abstract) {
+        parse_error(p, peek(p), "expected an identifier in declarator");
+        return NULL;
+    }
+    return parse_type_suffix(p, type, abstract);
+}
+
+/* declarator (§6.7.6): optional pointers then a direct-declarator. */
+static const qcc_type *parse_declarator(qcc_parser *p, const qcc_type *base,
+                                        int abstract, const qcc_token **out_name)
+{
+    const qcc_type *type = base;
+    while (at_punct(p, QCC_PUNCT_STAR)) {
+        advance(p);
+        unsigned q = parse_type_qualifier_list(p);
+        type = qcc_type_pointer(p->types, type, q);
+        if (type == NULL) {
+            p->oom = 1;
+            return NULL;
+        }
+    }
+    return parse_direct_declarator(p, type, abstract, out_name);
+}
+
+qcc_status qcc_parse_type_name(qcc_parser *p, const qcc_type **out)
+{
+    if (p == NULL || out == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    if (p->types == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+
+    const qcc_token *loc = peek(p);
+    declspec         ds;
+    parse_declaration_specifiers(p, &ds);
+    if (p->oom) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    const qcc_type *base = ds_base_type(p, &ds, loc);
+    if (base == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+    const qcc_token *name = NULL;
+    const qcc_type  *t    = parse_declarator(p, base, 1, &name);
+    if (t == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+    *out = t;
+    return p->had_error ? QCC_ERR_PARSE : QCC_OK;
+}
+
+int qcc_parser_at_declaration(const qcc_parser *p)
+{
+    const qcc_token *t = peek(p);
+    if (t->kind == QCC_TOKEN_KEYWORD) {
+        return is_decl_specifier_keyword(t->keyword);
+    }
+    if (t->kind == QCC_TOKEN_IDENTIFIER) {
+        return p->syms != NULL &&
+               qcc_symtab_is_typedef_name(p->syms, t->spelling, t->spelling_len);
+    }
+    return 0;
+}
+
+qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
+{
+    if (p == NULL || out == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    if (p->types == NULL || p->syms == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+
+    const qcc_token *specloc = peek(p);
+    declspec         ds;
+    parse_declaration_specifiers(p, &ds);
+    if (p->oom) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    const qcc_type *base = ds_base_type(p, &ds, specloc);
+    if (base == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+
+    /* A declaration with no declarators (e.g. `struct foo;`). */
+    if (at_punct(p, QCC_PUNCT_SEMI)) {
+        advance(p);
+        return p->had_error ? QCC_ERR_PARSE : QCC_OK;
+    }
+
+    for (;;) {
+        const qcc_token *name = NULL;
+        const qcc_type  *full = parse_declarator(p, base, 0, &name);
+        if (full == NULL) {
+            return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+        }
+
+        qcc_expr *init = NULL;
+        if (at_punct(p, QCC_PUNCT_EQ)) {
+            advance(p);
+            init = parse_assignment(p); /* Scalar initializer; braces deferred. */
+            if (init == NULL) {
+                return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+            }
+        }
+
+        qcc_decl d;
+        memset(&d, 0, sizeof(d));
+        d.storage   = ds.storage;
+        d.func_spec = ds.func_spec;
+        d.type      = full;
+        d.init      = init;
+        if (name != NULL) {
+            d.name     = name->spelling;
+            d.name_len = name->spelling_len;
+            d.source   = name->source;
+            d.offset   = name->offset;
+            d.line     = name->line;
+            d.column   = name->column;
+
+            qcc_sym_kind k = (ds.storage == QCC_SC_TYPEDEF)
+                                 ? QCC_SYM_TYPEDEF
+                                 : (full->kind == QCC_TYPE_FUNCTION
+                                        ? QCC_SYM_FUNCTION
+                                        : QCC_SYM_OBJECT);
+            if (qcc_symtab_insert(p->syms, d.name, d.name_len, QCC_NS_ORDINARY, k,
+                                  full, d.source, d.offset, d.line, d.column,
+                                  NULL) != QCC_OK) {
+                return QCC_ERR_OUT_OF_MEMORY;
+            }
+        } else {
+            d.source = specloc->source;
+            d.offset = specloc->offset;
+            d.line   = specloc->line;
+            d.column = specloc->column;
+        }
+
+        if (qcc_decl_list_push(out, &d) != QCC_OK) {
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+
+        if (at_punct(p, QCC_PUNCT_COMMA)) {
+            advance(p);
+            continue;
+        }
+        break;
+    }
+
+    if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after declaration")) {
+        return QCC_ERR_PARSE;
+    }
+    return p->had_error ? QCC_ERR_PARSE : QCC_OK;
 }

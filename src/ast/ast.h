@@ -36,6 +36,7 @@
 #include "arena/arena.h"
 #include "status/status.h"
 #include "token/token.h"
+#include "type/type.h"
 
 /*
  * The kind of an expression node (§6.5). Postfix `++`/`--` are a distinct kind
@@ -155,6 +156,70 @@ qcc_expr *qcc_expr_call(qcc_ast *ast, qcc_expr *callee, qcc_expr *const *args,
 
 /* Stable lowercase name of an expression kind ("ident", "binary", …). */
 const char *qcc_expr_kind_name(qcc_expr_kind kind);
+
+/* A storage-class specifier (§6.7.1 ¶1); at most one per declaration (§6.7.1 ¶2,
+   except _Thread_local with static/extern). QCC_SC_NONE means none was given. */
+typedef enum qcc_storage_class {
+    QCC_SC_NONE = 0,
+    QCC_SC_TYPEDEF,       /* typedef        */
+    QCC_SC_EXTERN,        /* extern         */
+    QCC_SC_STATIC,        /* static         */
+    QCC_SC_THREAD_LOCAL,  /* _Thread_local  */
+    QCC_SC_AUTO,          /* auto           */
+    QCC_SC_REGISTER       /* register       */
+} qcc_storage_class;
+
+/* Function-specifier bits (§6.7.4 ¶1), OR-combined. */
+enum {
+    QCC_FS_NONE     = 0,
+    QCC_FS_INLINE   = 1u << 0, /* inline     */
+    QCC_FS_NORETURN = 1u << 1  /* _Noreturn  */
+};
+
+/*
+ * One declared entity — a single init-declarator of a declaration (§6.7). A
+ * declaration like `int a, *b = 0;` yields several. A plain value (copied into a
+ * qcc_decl_list); its `type` is borrowed from a qcc_type_ctx and `init`/`name`
+ * from the ast/tokens.
+ *
+ *   storage    : the storage-class specifier (QCC_SC_NONE if none).
+ *   func_spec  : function-specifier bits (QCC_FS_*).
+ *   type       : the full declared type (after the declarator is applied).
+ *   name/_len  : the declared identifier (NULL/0 for an abstract declarator).
+ *   init       : the initializer expression, or NULL.
+ *   source/... : provenance (the declarator's identifier, or the specifiers).
+ */
+typedef struct qcc_decl {
+    qcc_storage_class        storage;
+    unsigned                 func_spec;
+    const qcc_type          *type;
+    const char              *name;
+    size_t                   name_len;
+    qcc_expr                *init;
+    const struct qcc_source *source;
+    size_t                   offset;
+    uint32_t                 line;
+    uint32_t                 column;
+} qcc_decl;
+
+/*
+ * A growable array of qcc_decl (the init-declarators of one or more declarations).
+ * The item array is heap-owned (seed allocator); the decls' types/names/inits are
+ * not owned here. Use the functions; treat the fields as private.
+ */
+typedef struct qcc_decl_list {
+    qcc_decl *items;
+    size_t    count;
+    size_t    capacity;
+} qcc_decl_list;
+
+void qcc_decl_list_init(qcc_decl_list *list);
+void qcc_decl_list_dispose(qcc_decl_list *list);
+qcc_status qcc_decl_list_push(qcc_decl_list *list, const qcc_decl *decl);
+
+/* Stable lowercase spelling of a storage class ("typedef", "static", "" for
+   QCC_SC_NONE). */
+const char *qcc_storage_class_name(qcc_storage_class sc);
 
 /*
  * Render an expression as a parenthesized prefix S-expression — "(+ a (* b c))"

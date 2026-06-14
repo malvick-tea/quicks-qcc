@@ -55,7 +55,7 @@ static qcc_status parse_expr(const char *text, char **dump, size_t *errs,
     qcc_ast ast;
     qcc_ast_init(&ast);
     qcc_parser parser;
-    qcc_parser_init(&parser, toks.items, toks.count, &ast, &d);
+    qcc_parser_init(&parser, toks.items, toks.count, &ast, NULL, NULL, &d);
 
     qcc_expr  *e  = NULL;
     qcc_status st = qcc_parse_expression(&parser, &e);
@@ -212,11 +212,12 @@ static void test_cursor_and_args(void)
     qcc_diag_sink d;
     qcc_diag_sink_init(&d);
     qcc_parser pr;
-    QTEST_CHECK_EQ_INT(qcc_parser_init(NULL, &tok, 1, &ast, &d),
+    QTEST_CHECK_EQ_INT(qcc_parser_init(NULL, &tok, 1, &ast, NULL, NULL, &d),
                        QCC_ERR_INVALID_ARGUMENT, "null parser");
-    QTEST_CHECK_EQ_INT(qcc_parser_init(&pr, &tok, 0, &ast, &d),
+    QTEST_CHECK_EQ_INT(qcc_parser_init(&pr, &tok, 0, &ast, NULL, NULL, &d),
                        QCC_ERR_INVALID_ARGUMENT, "zero count");
-    QTEST_CHECK_EQ_INT(qcc_parser_init(&pr, &tok, 1, &ast, &d), QCC_OK, "ok init");
+    QTEST_CHECK_EQ_INT(qcc_parser_init(&pr, &tok, 1, &ast, NULL, NULL, &d), QCC_OK,
+                       "ok init");
     qcc_diag_sink_dispose(&d);
     qcc_ast_dispose(&ast);
 }

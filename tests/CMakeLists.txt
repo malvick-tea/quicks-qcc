@@ -28,6 +28,7 @@ qcc_add_test(ast)
 qcc_add_test(parser)
 qcc_add_test(type)
 qcc_add_test(symtab)
+qcc_add_test(decl)
 
 # The #include suite needs real header files. Generate them into the build tree
 # so the test is hermetic: it depends on these fixtures and their directories
