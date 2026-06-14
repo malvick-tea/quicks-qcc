@@ -358,4 +358,71 @@ const char *qcc_stmt_kind_name(qcc_stmt_kind kind);
  */
 qcc_status qcc_stmt_dump(const qcc_stmt *stmt, char **out, size_t *len);
 
+/*
+ * External definitions (§6.9; ADR-0024 Unit 4). A translation unit is a sequence
+ * of external declarations, each either an ordinary declaration or a function
+ * definition.
+ */
+
+/* One function parameter (§6.9.1): its name (NULL/0 for an unnamed prototype
+   parameter) and its (adjusted, §6.7.6.3) type. Names borrow the token spelling. */
+typedef struct qcc_param {
+    const char     *name;
+    size_t          name_len;
+    const qcc_type *type;
+} qcc_param;
+
+/*
+ * A function definition (§6.9.1): the function name, its (nameless, canonical)
+ * function `type`, the parameter names/types, storage class and function
+ * specifiers, and the compound-statement `body`. The `params` array is arena-owned;
+ * `body` is an arena-owned qcc_stmt (a QCC_STMT_COMPOUND). Provenance is the name.
+ */
+typedef struct qcc_func_def {
+    qcc_storage_class        storage;
+    unsigned                 func_spec;
+    const qcc_type          *type;
+    const char              *name;
+    size_t                   name_len;
+    const qcc_param         *params;
+    size_t                   param_count;
+    qcc_stmt                *body;
+    const struct qcc_source *source;
+    size_t                   offset;
+    uint32_t                 line;
+    uint32_t                 column;
+} qcc_func_def;
+
+/*
+ * One external declaration (§6.9) — the result of qcc_parse_external_declaration.
+ * A tagged value the caller provides (out-parameter); its referenced arrays/body
+ * are arena-owned by the qcc_ast.
+ *
+ *   is_function : 1 => `func` is the definition; 0 => `decls`/`decl_count` are the
+ *                 ordinary declaration's init-declarators (possibly zero, e.g. for
+ *                 `struct foo;`).
+ */
+typedef struct qcc_extern_decl {
+    int              is_function;
+    qcc_func_def     func;
+    const qcc_decl  *decls;
+    size_t           decl_count;
+} qcc_extern_decl;
+
+/*
+ * Copy `size` bytes from `src` into the ast's arena and return the copy, or NULL
+ * (on OOM, or when size == 0 — the caller then stores an empty array). Lets the
+ * parser move a transient array (parameters, init-declarators) into ast lifetime
+ * without reaching into the arena directly.
+ */
+void *qcc_ast_dup(qcc_ast *ast, const void *src, size_t size);
+
+/*
+ * Render an external declaration as an S-expression: a function definition as
+ * "(func <name> (<param-name>…) <body>)" (an unnamed parameter prints as "?"), an
+ * ordinary declaration as "(decl <name>…)". Same ownership/return contract as
+ * qcc_expr_dump.
+ */
+qcc_status qcc_extern_decl_dump(const qcc_extern_decl *ed, char **out, size_t *len);
+
 #endif /* QCC_AST_AST_H */

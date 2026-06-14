@@ -7,7 +7,7 @@
  * recursive-descent parser with precedence climbing for the operator cascade
  * (ADR-0019). It is delivered in units, front of the grammar first.
  *
- * Scope so far (ADR-0019 Unit 1, ADR-0022 Unit 2, ADR-0023 Unit 3)
+ * Scope so far (ADR-0019 Unit 1, ADR-0022 Unit 2, ADR-0023 Unit 3, ADR-0024 Unit 4)
  *   Unit 1 — the whole §6.5 expression grammar over identifiers, constants, and
  *   string literals: primary, postfix (`[]`, calls, `.`/`->`, `++`/`--`), unary
  *   (`++`/`--`, `& * + - ~ !`, `sizeof`), cast (§6.5.4), the fifteen binary
@@ -24,9 +24,13 @@
  *   selection (`if`/`switch`), iteration (`while`/`do`/`for`), jump
  *   (`goto`/`continue`/`break`/`return`), and labeled (`case`/`default`/identifier)
  *   statements.
+ *   Unit 4 — external definitions (§6.9): a translation unit as a sequence of
+ *   external declarations, each an ordinary declaration or a function definition
+ *   (the function name at file scope, the body a block scope binding the
+ *   parameters).
  *   Still deferred: compound literals and `_Generic`, struct/union/enum
- *   *definitions* (only tag references are parsed), and external definitions /
- *   function bodies (§6.9, Unit 4).
+ *   *definitions* (only tag references are parsed), initializer lists (§6.7.9),
+ *   the K&R definition form, and all semantic analysis.
  *
  * Ownership
  *   A qcc_parser borrows everything: the token array (which must stay valid, and
@@ -67,6 +71,14 @@ typedef struct qcc_parser {
     qcc_diag_sink   *diags;   /* Borrowed; syntax errors are reported here.    */
     int              had_error; /* A syntax error was diagnosed.               */
     int              oom;       /* A node allocation failed (hard fault).      */
+
+    /* Function-definition parameter capture (§6.9.1; ADR-0024), private. While
+       capture_params is set, the declarator parser records the parameter
+       names/types of the function-definition declarator into cap_params (arena-
+       owned), so the body's scope can bind them. Off for ordinary declarations. */
+    int              capture_params;
+    const qcc_param *cap_params;
+    size_t           cap_param_count;
 } qcc_parser;
 
 /*
@@ -119,6 +131,19 @@ qcc_status qcc_parse_type_name(qcc_parser *parser, const qcc_type **out);
  * ctx/symtab was provided. *out is NULL unless QCC_OK.
  */
 qcc_status qcc_parse_statement(qcc_parser *parser, qcc_stmt **out);
+
+/*
+ * Parse one external declaration (§6.9) at the cursor — either a function
+ * definition (declaration-specifiers, a function declarator, and a compound-
+ * statement body) or an ordinary declaration — filling *out (a tagged result; its
+ * arrays/body are owned by the parser's ast). A translation unit is the loop of
+ * this until qcc_parser_at_end. The function name is registered at file scope and
+ * its body parsed in a block scope binding the parameters; requires the parser's
+ * type context and symbol table. Returns QCC_OK; on a syntax error a diagnostic
+ * was emitted and the return is QCC_ERR_PARSE; QCC_ERR_OUT_OF_MEMORY on a hard
+ * fault; QCC_ERR_INVALID_ARGUMENT if no type ctx/symtab was provided.
+ */
+qcc_status qcc_parse_external_declaration(qcc_parser *parser, qcc_extern_decl *out);
 
 /* Whether the cursor looks at the start of a declaration (a declaration-specifier
    keyword or a visible typedef-name) — the §6.7.8 declaration-vs-expression test. */

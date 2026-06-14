@@ -28,6 +28,14 @@ void qcc_ast_dispose(qcc_ast *ast)
     }
 }
 
+void *qcc_ast_dup(qcc_ast *ast, const void *src, size_t size)
+{
+    if (ast == NULL || size == 0) {
+        return NULL; /* size 0 => an empty array; the caller stores NULL/0. */
+    }
+    return qcc_arena_memdup(&ast->arena, src, size, 0);
+}
+
 /* Allocate a zeroed node of `kind`, stamping its provenance from `loc`. */
 static qcc_expr *node_new(qcc_ast *ast, qcc_expr_kind kind, const qcc_token *loc)
 {
@@ -846,6 +854,68 @@ qcc_status qcc_stmt_dump(const qcc_stmt *stmt, char **out, size_t *len)
     }
     strbuf b = { NULL, 0, 0 };
     if (!emit_stmt(&b, stmt) || !sb_reserve(&b, 0)) {
+        free(b.data);
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    b.data[b.len] = '\0';
+    *out = b.data;
+    *len = b.len;
+    return QCC_OK;
+}
+
+/* Emit a list of declared names ("(decl a b)" / the parameter list "(a b)"). */
+static int emit_name(strbuf *b, const char *name, size_t name_len)
+{
+    if (name != NULL) {
+        return sb_putn(b, name, name_len);
+    }
+    return sb_putc(b, '?'); /* An unnamed (abstract) declarator. */
+}
+
+static int emit_extern_decl(strbuf *b, const qcc_extern_decl *ed)
+{
+    if (ed->is_function) {
+        const qcc_func_def *f = &ed->func;
+        if (!sb_puts(b, "(func ") || !emit_name(b, f->name, f->name_len) ||
+            !sb_puts(b, " (")) {
+            return 0;
+        }
+        for (size_t i = 0; i < f->param_count; ++i) {
+            if (i != 0 && !sb_putc(b, ' ')) {
+                return 0;
+            }
+            if (!emit_name(b, f->params[i].name, f->params[i].name_len)) {
+                return 0;
+            }
+        }
+        if (!sb_puts(b, ") ")) {
+            return 0;
+        }
+        if (f->body != NULL ? !emit_stmt(b, f->body) : !sb_puts(b, "nil")) {
+            return 0;
+        }
+        return sb_putc(b, ')');
+    }
+
+    if (!sb_puts(b, "(decl")) {
+        return 0;
+    }
+    for (size_t i = 0; i < ed->decl_count; ++i) {
+        if (!sb_putc(b, ' ') ||
+            !emit_name(b, ed->decls[i].name, ed->decls[i].name_len)) {
+            return 0;
+        }
+    }
+    return sb_putc(b, ')');
+}
+
+qcc_status qcc_extern_decl_dump(const qcc_extern_decl *ed, char **out, size_t *len)
+{
+    if (ed == NULL || out == NULL || len == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    strbuf b = { NULL, 0, 0 };
+    if (!emit_extern_decl(&b, ed) || !sb_reserve(&b, 0)) {
         free(b.data);
         return QCC_ERR_OUT_OF_MEMORY;
     }

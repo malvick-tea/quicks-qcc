@@ -31,6 +31,9 @@ qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
     parser->diags     = diags;
     parser->had_error = 0;
     parser->oom       = 0;
+    parser->capture_params  = 0;
+    parser->cap_params      = NULL;
+    parser->cap_param_count = 0;
     return QCC_OK;
 }
 
@@ -875,10 +878,12 @@ static const qcc_type *adjust_param_type(qcc_parser *p, const qcc_type *t)
 /* A function declarator's parameter list (§6.7.6.3); '(' already consumed. */
 static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
 {
-    const qcc_type **params = NULL;
-    size_t           n      = 0;
-    size_t           cap    = 0;
+    const qcc_type **params   = NULL;
+    qcc_param       *caps     = NULL; /* Parallel (name,type); only when capturing. */
+    size_t           n        = 0;
+    size_t           cap      = 0;
     int              variadic = 0;
+    int              capture  = p->capture_params;
 
     int void_only = (at_keyword(p, QCC_KW_VOID) && p->pos + 1 < p->count &&
                      p->tokens[p->pos + 1].kind == QCC_TOKEN_PUNCT &&
@@ -899,25 +904,17 @@ static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
             const qcc_token *ploc = peek(p);
             declspec         ds;
             parse_declaration_specifiers(p, &ds);
-            if (p->oom) {
-                free(params);
-                return NULL;
-            }
-            const qcc_type *pbase = ds_base_type(p, &ds, ploc);
-            if (pbase == NULL) {
-                free(params);
-                return NULL;
-            }
+            const qcc_type  *pbase = p->oom ? NULL : ds_base_type(p, &ds, ploc);
             const qcc_token *pname = NULL;
-            const qcc_type  *pt = parse_declarator(p, pbase, 1, &pname);
-            if (pt == NULL) {
-                free(params);
-                return NULL;
+            const qcc_type  *pt =
+                (pbase == NULL) ? NULL : parse_declarator(p, pbase, 1, &pname);
+            if (pt != NULL) {
+                pt = adjust_param_type(p, pt);
             }
-            pt = adjust_param_type(p, pt);
             if (pt == NULL) {
                 free(params);
-                return NULL;
+                free(caps);
+                return NULL; /* had_error / oom set by the failing step. */
             }
             if (n == cap) {
                 size_t           ncap  = (cap == 0) ? 4u : cap * 2u;
@@ -925,13 +922,31 @@ static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
                     params, ncap * sizeof(*grown));
                 if (grown == NULL) {
                     free(params);
+                    free(caps);
                     p->oom = 1;
                     return NULL;
                 }
                 params = grown;
-                cap    = ncap;
+                if (capture) {
+                    qcc_param *gc =
+                        (qcc_param *)realloc(caps, ncap * sizeof(*gc));
+                    if (gc == NULL) {
+                        free(params);
+                        free(caps);
+                        p->oom = 1;
+                        return NULL;
+                    }
+                    caps = gc;
+                }
+                cap = ncap;
             }
-            params[n++] = pt;
+            params[n] = pt;
+            if (capture) {
+                caps[n].name     = (pname != NULL) ? pname->spelling : NULL;
+                caps[n].name_len = (pname != NULL) ? pname->spelling_len : 0;
+                caps[n].type     = pt;
+            }
+            ++n;
             if (at_punct(p, QCC_PUNCT_COMMA)) {
                 advance(p);
                 continue;
@@ -940,6 +955,7 @@ static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
         }
         if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after parameters")) {
             free(params);
+            free(caps);
             return NULL;
         }
     }
@@ -947,8 +963,28 @@ static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
     const qcc_type *ft = qcc_type_function(p->types, ret, params, n, variadic);
     free(params);
     if (ft == NULL) {
+        free(caps);
         p->oom = 1;
+        return NULL;
     }
+    if (capture) {
+        /* The innermost function declarator's parameter list completes last, so
+           this stores the defined function's own parameters (ADR-0024). */
+        p->cap_params      = NULL;
+        p->cap_param_count = 0;
+        if (n != 0) {
+            qcc_param *owned =
+                (qcc_param *)qcc_ast_dup(p->ast, caps, n * sizeof(*caps));
+            if (owned == NULL) {
+                free(caps);
+                p->oom = 1;
+                return NULL;
+            }
+            p->cap_params      = owned;
+            p->cap_param_count = n;
+        }
+    }
+    free(caps);
     return ft;
 }
 
@@ -1669,4 +1705,149 @@ qcc_status qcc_parse_statement(qcc_parser *p, qcc_stmt **out)
     }
     *out = s;
     return QCC_OK;
+}
+
+/*
+ * External definitions (§6.9; ADR-0024 Unit 4). A translation unit is the loop of
+ * qcc_parse_external_declaration over the token stream. Each external declaration
+ * is either a function definition or an ordinary declaration; they share the same
+ * declaration-specifiers + declarator prefix and diverge only at the token after
+ * the first declarator (a '{' begins a function body).
+ */
+
+/* Parse an ordinary declaration at the cursor and store its init-declarators in
+   `out` (an arena-owned copy). Shared by the no-declarator and non-function paths. */
+static qcc_status parse_declaration_into_extern(qcc_parser *p,
+                                                qcc_extern_decl *out)
+{
+    qcc_decl_list decls;
+    qcc_decl_list_init(&decls);
+    qcc_status st = qcc_parse_declaration(p, &decls);
+    if (st != QCC_OK) {
+        qcc_decl_list_dispose(&decls);
+        return st;
+    }
+    out->is_function = 0;
+    out->decls       = NULL;
+    out->decl_count  = 0;
+    if (decls.count != 0) {
+        qcc_decl *owned = (qcc_decl *)qcc_ast_dup(p->ast, decls.items,
+                                                  decls.count * sizeof(*owned));
+        if (owned == NULL) {
+            qcc_decl_list_dispose(&decls);
+            p->oom = 1;
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        out->decls      = owned;
+        out->decl_count = decls.count;
+    }
+    qcc_decl_list_dispose(&decls);
+    return QCC_OK;
+}
+
+/* The body of a function definition: the function name is registered at file
+   scope (so the body may recurse), a block scope is opened binding the parameters
+   (§6.2.1, §6.9.1), and the brace-delimited block is parsed in that scope (its top
+   level shares the parameter scope, so a body declaration cannot reuse a parameter
+   name). `name`/`full`/`params`/`param_count`/`ds` come from the declarator. */
+static qcc_status parse_function_definition(qcc_parser *p, const declspec *ds,
+                                            const qcc_token *name,
+                                            const qcc_type *full,
+                                            const qcc_param *params,
+                                            size_t param_count,
+                                            qcc_extern_decl *out)
+{
+    if (qcc_symtab_insert(p->syms, name->spelling, name->spelling_len,
+                          QCC_NS_ORDINARY, QCC_SYM_FUNCTION, full, name->source,
+                          name->offset, name->line, name->column, NULL) != QCC_OK) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    if (qcc_symtab_push_scope(p->syms, QCC_SCOPE_BLOCK) != QCC_OK) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < param_count; ++i) {
+        if (params[i].name == NULL) {
+            continue; /* An unnamed prototype parameter binds nothing. */
+        }
+        if (qcc_symtab_insert(p->syms, params[i].name, params[i].name_len,
+                              QCC_NS_ORDINARY, QCC_SYM_OBJECT, params[i].type,
+                              NULL, 0, 0, 0, NULL) != QCC_OK) {
+            qcc_symtab_pop_scope(p->syms);
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+    }
+
+    const qcc_token *lbrace = peek(p); /* the '{' confirmed by the caller */
+    qcc_stmt        *body   = parse_block_items(p, lbrace);
+    qcc_symtab_pop_scope(p->syms);
+    if (body == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+
+    out->is_function       = 1;
+    out->func.storage      = ds->storage;
+    out->func.func_spec    = ds->func_spec;
+    out->func.type         = full;
+    out->func.name         = name->spelling;
+    out->func.name_len     = name->spelling_len;
+    out->func.params       = params;
+    out->func.param_count  = param_count;
+    out->func.body         = body;
+    out->func.source       = name->source;
+    out->func.offset       = name->offset;
+    out->func.line         = name->line;
+    out->func.column       = name->column;
+    return p->had_error ? QCC_ERR_PARSE : QCC_OK;
+}
+
+qcc_status qcc_parse_external_declaration(qcc_parser *p, qcc_extern_decl *out)
+{
+    if (p == NULL || out == NULL || p->types == NULL || p->syms == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    memset(out, 0, sizeof(*out));
+
+    size_t           start   = p->pos;
+    const qcc_token *specloc = peek(p);
+    declspec         ds;
+    parse_declaration_specifiers(p, &ds);
+    if (p->oom) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    const qcc_type *base = ds_base_type(p, &ds, specloc);
+    if (base == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+
+    /* A declaration with no declarators (e.g. `struct foo;`): hand the whole thing
+       to the declaration parser. */
+    if (at_punct(p, QCC_PUNCT_SEMI)) {
+        p->pos = start;
+        return parse_declaration_into_extern(p, out);
+    }
+
+    /* Parse the first declarator, capturing parameter names in case a function
+       body follows. */
+    p->capture_params  = 1;
+    p->cap_params      = NULL;
+    p->cap_param_count = 0;
+    const qcc_token *name        = NULL;
+    const qcc_type  *full        = parse_declarator(p, base, 0, &name);
+    const qcc_param *params      = p->cap_params;
+    size_t           param_count = p->cap_param_count;
+    p->capture_params = 0;
+    if (full == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+
+    if (name != NULL && full->kind == QCC_TYPE_FUNCTION &&
+        at_punct(p, QCC_PUNCT_LBRACE)) {
+        return parse_function_definition(p, &ds, name, full, params, param_count,
+                                         out);
+    }
+
+    /* Not a function definition: re-parse the whole declaration (the speculative
+       declarator parse mutated no symbol-table state, only the cursor). */
+    p->pos = start;
+    return parse_declaration_into_extern(p, out);
 }
