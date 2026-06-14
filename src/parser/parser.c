@@ -1217,3 +1217,456 @@ qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
     }
     return p->had_error ? QCC_ERR_PARSE : QCC_OK;
 }
+
+/*
+ * Statements (§6.8; ADR-0023 Unit 3). Recursive descent dispatching on the leading
+ * token. A compound statement, and a `for` with a declaration in its first clause,
+ * open a block scope (§6.2.1) around their contents so declaration parsing and the
+ * §6.7.8 typedef test resolve at the right depth. A parse stops at the first syntax
+ * error (no panic-mode recovery yet); semantic checks (a `break` outside a loop, an
+ * undefined `goto` target, a `case` outside a switch, …) are a later pass.
+ */
+
+static qcc_stmt *parse_statement(qcc_parser *p);
+
+/* Mark a statement-node allocation failure and return NULL. */
+static qcc_stmt *fail_oom_stmt(qcc_parser *p)
+{
+    p->oom = 1;
+    return NULL;
+}
+
+/* Does the cursor look at `identifier :` — a labeled statement (§6.8.1)? Checked
+   before the declaration test because a label may even spell a typedef-name
+   (labels are a separate name space, §6.2.3). */
+static int at_label(const qcc_parser *p)
+{
+    if (peek(p)->kind != QCC_TOKEN_IDENTIFIER || p->pos + 1 >= p->count) {
+        return 0;
+    }
+    const qcc_token *nx = &p->tokens[p->pos + 1];
+    return nx->kind == QCC_TOKEN_PUNCT && nx->punct == QCC_PUNCT_COLON;
+}
+
+/* A declaration as a block item (§6.8.2): parse it (consuming its ';') and wrap
+   the resulting init-declarators in a DECL statement copied into the ast. */
+static qcc_stmt *parse_decl_stmt(qcc_parser *p)
+{
+    const qcc_token *loc = peek(p);
+    qcc_decl_list    decls;
+    qcc_decl_list_init(&decls);
+    qcc_status st = qcc_parse_declaration(p, &decls);
+    if (st != QCC_OK) {
+        qcc_decl_list_dispose(&decls);
+        return NULL; /* had_error / oom already set by qcc_parse_declaration. */
+    }
+    qcc_stmt *s = qcc_stmt_decl(p->ast, decls.items, decls.count, loc);
+    qcc_decl_list_dispose(&decls);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* expression-statement, including the null statement `;` (§6.8.3). */
+static qcc_stmt *parse_expression_statement(qcc_parser *p)
+{
+    const qcc_token *loc = peek(p);
+    if (at_punct(p, QCC_PUNCT_SEMI)) {
+        advance(p);
+        qcc_stmt *s = qcc_stmt_expr(p->ast, NULL, loc); /* the null statement */
+        return (s != NULL) ? s : fail_oom_stmt(p);
+    }
+    qcc_expr *e = parse_expression(p);
+    if (e == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after expression")) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_expr(p->ast, e, loc);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* The block-item list of a compound statement (§6.8.2); '{' at the cursor. The
+   surrounding block scope is opened/closed by parse_compound_statement. */
+static qcc_stmt *parse_block_items(qcc_parser *p, const qcc_token *lbrace)
+{
+    advance(p); /* '{' */
+    qcc_stmt **items = NULL;
+    size_t     n     = 0;
+    size_t     cap   = 0;
+
+    while (!at_punct(p, QCC_PUNCT_RBRACE) && peek(p)->kind != QCC_TOKEN_EOF) {
+        qcc_stmt *item = (!at_label(p) && qcc_parser_at_declaration(p))
+                             ? parse_decl_stmt(p)
+                             : parse_statement(p);
+        if (item == NULL) {
+            free(items);
+            return NULL;
+        }
+        if (n == cap) {
+            size_t     ncap  = (cap == 0) ? 8u : cap * 2u;
+            qcc_stmt **grown = (qcc_stmt **)realloc(items, ncap * sizeof(*grown));
+            if (grown == NULL) {
+                free(items);
+                return fail_oom_stmt(p);
+            }
+            items = grown;
+            cap   = ncap;
+        }
+        items[n++] = item;
+    }
+    if (!expect_punct(p, QCC_PUNCT_RBRACE, "expected '}' to close block")) {
+        free(items);
+        return NULL;
+    }
+    qcc_stmt *c = qcc_stmt_compound(p->ast, items, n, lbrace);
+    free(items);
+    return (c != NULL) ? c : fail_oom_stmt(p);
+}
+
+/* compound-statement (§6.8.2): a brace-delimited block; opens a block scope. */
+static qcc_stmt *parse_compound_statement(qcc_parser *p)
+{
+    const qcc_token *lbrace = peek(p); /* '{' */
+    if (qcc_symtab_push_scope(p->syms, QCC_SCOPE_BLOCK) != QCC_OK) {
+        return fail_oom_stmt(p);
+    }
+    qcc_stmt *s = parse_block_items(p, lbrace);
+    qcc_symtab_pop_scope(p->syms);
+    return s;
+}
+
+/* if-statement (§6.8.4.1). The else binds to this if: the then-branch is parsed
+   first and greedily consumes any else, which is the nearest-if rule. */
+static qcc_stmt *parse_if_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* if */
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after 'if'")) {
+        return NULL;
+    }
+    qcc_expr *cond = parse_expression(p);
+    if (cond == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after if condition")) {
+        return NULL;
+    }
+    qcc_stmt *then_s = parse_statement(p);
+    if (then_s == NULL) {
+        return NULL;
+    }
+    qcc_stmt *else_s = NULL;
+    if (at_keyword(p, QCC_KW_ELSE)) {
+        advance(p);
+        else_s = parse_statement(p);
+        if (else_s == NULL) {
+            return NULL;
+        }
+    }
+    qcc_stmt *s = qcc_stmt_if(p->ast, cond, then_s, else_s, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* switch-statement (§6.8.4.2). */
+static qcc_stmt *parse_switch_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* switch */
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after 'switch'")) {
+        return NULL;
+    }
+    qcc_expr *cond = parse_expression(p);
+    if (cond == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after switch expression")) {
+        return NULL;
+    }
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_switch(p->ast, cond, body, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* while-statement (§6.8.5.1). */
+static qcc_stmt *parse_while_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* while */
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after 'while'")) {
+        return NULL;
+    }
+    qcc_expr *cond = parse_expression(p);
+    if (cond == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after while condition")) {
+        return NULL;
+    }
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_while(p->ast, cond, body, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* do-while-statement (§6.8.5.2). */
+static qcc_stmt *parse_do_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* do */
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    if (!at_keyword(p, QCC_KW_WHILE)) {
+        parse_error(p, peek(p), "expected 'while' after do-statement body");
+        return NULL;
+    }
+    advance(p); /* while */
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after 'while'")) {
+        return NULL;
+    }
+    qcc_expr *cond = parse_expression(p);
+    if (cond == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_RPAREN,
+                      "expected ')' after do-while condition") ||
+        !expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after do-while statement")) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_do(p->ast, body, cond, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* The clauses and body of a for-statement (§6.8.5.3); the block scope that holds
+   a clause-1 declaration is opened/closed by parse_for_statement. */
+static qcc_stmt *parse_for_inner(qcc_parser *p, const qcc_token *kw)
+{
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after 'for'")) {
+        return NULL;
+    }
+
+    /* Clause 1: a declaration (consuming its ';'), an expression ';', or empty. */
+    qcc_stmt *init = NULL;
+    if (at_punct(p, QCC_PUNCT_SEMI)) {
+        advance(p);
+    } else if (qcc_parser_at_declaration(p)) {
+        init = parse_decl_stmt(p);
+        if (init == NULL) {
+            return NULL;
+        }
+    } else {
+        const qcc_token *loc = peek(p);
+        qcc_expr        *e   = parse_expression(p);
+        if (e == NULL) {
+            return NULL;
+        }
+        if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after for-init")) {
+            return NULL;
+        }
+        init = qcc_stmt_expr(p->ast, e, loc);
+        if (init == NULL) {
+            return fail_oom_stmt(p);
+        }
+    }
+
+    /* Clause 2: the controlling expression, optional. */
+    qcc_expr *cond = NULL;
+    if (!at_punct(p, QCC_PUNCT_SEMI)) {
+        cond = parse_expression(p);
+        if (cond == NULL) {
+            return NULL;
+        }
+    }
+    if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after for-condition")) {
+        return NULL;
+    }
+
+    /* Clause 3: the iteration expression, optional. */
+    qcc_expr *post = NULL;
+    if (!at_punct(p, QCC_PUNCT_RPAREN)) {
+        post = parse_expression(p);
+        if (post == NULL) {
+            return NULL;
+        }
+    }
+    if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after for-clauses")) {
+        return NULL;
+    }
+
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_for(p->ast, init, cond, post, body, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* for-statement (§6.8.5.3): a block scope wraps the clauses and body so a
+   declaration in clause 1 is scoped to the loop. */
+static qcc_stmt *parse_for_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* for */
+    if (qcc_symtab_push_scope(p->syms, QCC_SCOPE_BLOCK) != QCC_OK) {
+        return fail_oom_stmt(p);
+    }
+    qcc_stmt *s = parse_for_inner(p, kw);
+    qcc_symtab_pop_scope(p->syms);
+    return s;
+}
+
+/* goto-statement (§6.8.6.1). */
+static qcc_stmt *parse_goto_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* goto */
+    const qcc_token *id = peek(p);
+    if (id->kind != QCC_TOKEN_IDENTIFIER) {
+        parse_error(p, id, "expected a label name after 'goto'");
+        return NULL;
+    }
+    advance(p);
+    if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after goto statement")) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_goto(p->ast, id->spelling, id->spelling_len, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* break / continue statements (§6.8.6.3, §6.8.6.2). */
+static qcc_stmt *parse_break_or_continue(qcc_parser *p, int is_break)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* break / continue */
+    if (!expect_punct(p, QCC_PUNCT_SEMI,
+                      is_break ? "expected ';' after 'break'"
+                               : "expected ';' after 'continue'")) {
+        return NULL;
+    }
+    qcc_stmt *s =
+        is_break ? qcc_stmt_break(p->ast, kw) : qcc_stmt_continue(p->ast, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* return-statement (§6.8.6.4); the value is optional. */
+static qcc_stmt *parse_return_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* return */
+    qcc_expr *value = NULL;
+    if (!at_punct(p, QCC_PUNCT_SEMI)) {
+        value = parse_expression(p);
+        if (value == NULL) {
+            return NULL;
+        }
+    }
+    if (!expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after return statement")) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_return(p->ast, value, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* An identifier-labeled statement (§6.8.1); at_label confirmed the ':' ahead. */
+static qcc_stmt *parse_label_statement(qcc_parser *p)
+{
+    const qcc_token *id = peek(p);
+    advance(p); /* identifier */
+    advance(p); /* ':' */
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_label(p->ast, id->spelling, id->spelling_len, body, id);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* case-labeled statement (§6.8.1); the label is a constant-expression (§6.6). */
+static qcc_stmt *parse_case_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* case */
+    qcc_expr *value = parse_conditional(p);
+    if (value == NULL) {
+        return NULL;
+    }
+    if (!expect_punct(p, QCC_PUNCT_COLON, "expected ':' after case label")) {
+        return NULL;
+    }
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_case(p->ast, value, body, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* default-labeled statement (§6.8.1). */
+static qcc_stmt *parse_default_statement(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* default */
+    if (!expect_punct(p, QCC_PUNCT_COLON, "expected ':' after 'default'")) {
+        return NULL;
+    }
+    qcc_stmt *body = parse_statement(p);
+    if (body == NULL) {
+        return NULL;
+    }
+    qcc_stmt *s = qcc_stmt_default(p->ast, body, kw);
+    return (s != NULL) ? s : fail_oom_stmt(p);
+}
+
+/* statement (§6.8): dispatch on the leading token. */
+static qcc_stmt *parse_statement(qcc_parser *p)
+{
+    const qcc_token *t = peek(p);
+
+    if (at_punct(p, QCC_PUNCT_LBRACE)) {
+        return parse_compound_statement(p);
+    }
+    if (t->kind == QCC_TOKEN_KEYWORD) {
+        switch (t->keyword) {
+        case QCC_KW_IF:       return parse_if_statement(p);
+        case QCC_KW_SWITCH:   return parse_switch_statement(p);
+        case QCC_KW_WHILE:    return parse_while_statement(p);
+        case QCC_KW_DO:       return parse_do_statement(p);
+        case QCC_KW_FOR:      return parse_for_statement(p);
+        case QCC_KW_GOTO:     return parse_goto_statement(p);
+        case QCC_KW_BREAK:    return parse_break_or_continue(p, 1);
+        case QCC_KW_CONTINUE: return parse_break_or_continue(p, 0);
+        case QCC_KW_RETURN:   return parse_return_statement(p);
+        case QCC_KW_CASE:     return parse_case_statement(p);
+        case QCC_KW_DEFAULT:  return parse_default_statement(p);
+        default:              break; /* Other keywords begin an expression. */
+        }
+    }
+    if (at_label(p)) {
+        return parse_label_statement(p);
+    }
+    return parse_expression_statement(p);
+}
+
+qcc_status qcc_parse_statement(qcc_parser *p, qcc_stmt **out)
+{
+    if (p == NULL || out == NULL || p->types == NULL || p->syms == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+
+    qcc_stmt *s = parse_statement(p);
+    if (p->oom) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    if (s == NULL || p->had_error) {
+        return QCC_ERR_PARSE;
+    }
+    *out = s;
+    return QCC_OK;
+}

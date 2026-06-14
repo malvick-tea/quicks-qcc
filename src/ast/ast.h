@@ -3,10 +3,12 @@
  *
  * Responsibility
  * Model the parse tree the parser builds and the later stages walk. This header
- * defines the expression node `qcc_expr` (§6.5) — the first delivery (ADR-0019
- * Unit 1) — and the `qcc_ast` arena that owns the nodes. Declarations, statements,
- * and types grow new node kinds in later units; because operators reuse the
- * punctuator enum and leaves embed their token, those additions stay localized.
+ * defines the expression node `qcc_expr` (§6.5; ADR-0019 Unit 1), the declared
+ * entity `qcc_decl` (§6.7; ADR-0022 Unit 2), and the statement node `qcc_stmt`
+ * (§6.8; ADR-0023 Unit 3), all owned by the `qcc_ast` arena. Each grew as its
+ * parser unit landed; because operators reuse the punctuator enum, leaves embed
+ * their token, and every node is a flat tagged struct, the additions stayed
+ * localized.
  *
  * Node model (and why a flat tagged node)
  *   One `qcc_expr` struct, tagged by `kind`, with the per-kind fields documented
@@ -240,5 +242,120 @@ const char *qcc_storage_class_name(qcc_storage_class sc);
  * literal. Returns QCC_OK or QCC_ERR_OUT_OF_MEMORY / QCC_ERR_INVALID_ARGUMENT.
  */
 qcc_status qcc_expr_dump(const qcc_expr *expr, char **out, size_t *len);
+
+/*
+ * The kind of a statement node (§6.8; ADR-0023 Unit 3). Like qcc_expr this is a
+ * flat tagged node; the fields below are valid per kind. Postfix `++`/`--` was a
+ * distinct expression kind for the same reason statements are distinct kinds:
+ * their structure and later semantics differ.
+ */
+typedef enum qcc_stmt_kind {
+    QCC_STMT_COMPOUND = 0, /* §6.8.2: { block-item-list } — `items`.             */
+    QCC_STMT_DECL,         /* §6.8.2/§6.7: a declaration block item — `decls`.   */
+    QCC_STMT_EXPR,         /* §6.8.3: expression ; (`expr` NULL = null stmt).    */
+    QCC_STMT_IF,           /* §6.8.4.1: if(`expr`)`body` [else `otherwise`].     */
+    QCC_STMT_SWITCH,       /* §6.8.4.2: switch(`expr`) `body`.                   */
+    QCC_STMT_WHILE,        /* §6.8.5.1: while(`expr`) `body`.                    */
+    QCC_STMT_DO,           /* §6.8.5.2: do `body` while(`expr`) ;.               */
+    QCC_STMT_FOR,          /* §6.8.5.3: for(`init` `expr` ; `expr3`) `body`.     */
+    QCC_STMT_GOTO,         /* §6.8.6.1: goto `label` ;.                          */
+    QCC_STMT_CONTINUE,     /* §6.8.6.2: continue ;.                              */
+    QCC_STMT_BREAK,        /* §6.8.6.3: break ;.                                 */
+    QCC_STMT_RETURN,       /* §6.8.6.4: return [`expr`] ;.                       */
+    QCC_STMT_LABEL,        /* §6.8.1: `label` : `body`.                          */
+    QCC_STMT_CASE,         /* §6.8.1: case `expr` : `body`.                      */
+    QCC_STMT_DEFAULT       /* §6.8.1: default : `body`.                          */
+} qcc_stmt_kind;
+
+/*
+ * One statement node (§6.8). Arena-owned by the qcc_ast; never freed individually.
+ * Fields are valid per `kind` (see the enum); the rest read NULL/0:
+ *
+ *   expr       : EXPR expression (NULL = null statement); IF/SWITCH/WHILE/DO
+ *                controlling expression; FOR condition (clause 2, may be NULL);
+ *                RETURN value (may be NULL); CASE constant-expression.
+ *   expr3      : FOR iteration expression (clause 3, may be NULL).
+ *   body       : IF then-branch; SWITCH/WHILE/DO/FOR body; LABEL/CASE/DEFAULT
+ *                labeled statement.
+ *   otherwise  : IF else-branch (may be NULL).
+ *   init       : FOR first clause — a DECL or EXPR statement, or NULL.
+ *   items/_n   : COMPOUND block items, in order (arena-copied array).
+ *   decls/_n   : DECL — the init-declarators one declaration produced (arena-copied).
+ *   label/_len : GOTO target / LABEL name (borrowed token spelling).
+ *   source/... : provenance for diagnostics (the leading keyword/identifier).
+ */
+typedef struct qcc_stmt qcc_stmt;
+struct qcc_stmt {
+    qcc_stmt_kind            kind;
+
+    qcc_expr                *expr;
+    qcc_expr                *expr3;
+
+    qcc_stmt                *body;
+    qcc_stmt                *otherwise;
+    qcc_stmt                *init;
+
+    qcc_stmt               **items;
+    size_t                   item_count;
+
+    qcc_decl                *decls;
+    size_t                   decl_count;
+
+    const char              *label;
+    size_t                   label_len;
+
+    const struct qcc_source *source;
+    size_t                   offset;
+    uint32_t                 line;
+    uint32_t                 column;
+};
+
+/*
+ * Statement constructors. Each allocates from the ast's arena and returns the
+ * node, or NULL on out-of-memory (mapped by the caller to QCC_ERR_OUT_OF_MEMORY).
+ * Required children must be non-NULL or the constructor returns NULL; the
+ * arguments documented as optional (an else-branch, a return value, a null
+ * statement's expression, the for-clauses) may be NULL. The `loc` token supplies
+ * provenance. The compound/decl constructors copy their arrays into the arena, so
+ * the caller's transient array can be freed afterwards.
+ */
+qcc_stmt *qcc_stmt_compound(qcc_ast *ast, qcc_stmt *const *items, size_t count,
+                            const qcc_token *loc);
+qcc_stmt *qcc_stmt_decl(qcc_ast *ast, const qcc_decl *decls, size_t count,
+                        const qcc_token *loc);
+qcc_stmt *qcc_stmt_expr(qcc_ast *ast, qcc_expr *expr, const qcc_token *loc);
+qcc_stmt *qcc_stmt_if(qcc_ast *ast, qcc_expr *cond, qcc_stmt *then_s,
+                      qcc_stmt *else_s, const qcc_token *loc);
+qcc_stmt *qcc_stmt_switch(qcc_ast *ast, qcc_expr *cond, qcc_stmt *body,
+                          const qcc_token *loc);
+qcc_stmt *qcc_stmt_while(qcc_ast *ast, qcc_expr *cond, qcc_stmt *body,
+                         const qcc_token *loc);
+qcc_stmt *qcc_stmt_do(qcc_ast *ast, qcc_stmt *body, qcc_expr *cond,
+                      const qcc_token *loc);
+qcc_stmt *qcc_stmt_for(qcc_ast *ast, qcc_stmt *init, qcc_expr *cond,
+                       qcc_expr *post, qcc_stmt *body, const qcc_token *loc);
+qcc_stmt *qcc_stmt_goto(qcc_ast *ast, const char *label, size_t label_len,
+                        const qcc_token *loc);
+qcc_stmt *qcc_stmt_continue(qcc_ast *ast, const qcc_token *loc);
+qcc_stmt *qcc_stmt_break(qcc_ast *ast, const qcc_token *loc);
+qcc_stmt *qcc_stmt_return(qcc_ast *ast, qcc_expr *value, const qcc_token *loc);
+qcc_stmt *qcc_stmt_label(qcc_ast *ast, const char *label, size_t label_len,
+                         qcc_stmt *body, const qcc_token *loc);
+qcc_stmt *qcc_stmt_case(qcc_ast *ast, qcc_expr *value, qcc_stmt *body,
+                        const qcc_token *loc);
+qcc_stmt *qcc_stmt_default(qcc_ast *ast, qcc_stmt *body, const qcc_token *loc);
+
+/* Stable lowercase name of a statement kind ("compound", "if", "return", …). */
+const char *qcc_stmt_kind_name(qcc_stmt_kind kind);
+
+/*
+ * Render a statement as a parenthesized prefix S-expression, reusing the
+ * expression form — "(if c (expr x) (expr y))", "(block (decl i) (expr (= i 0)))",
+ * "(for (decl i) (< i n) (post++ i) (empty))". Omitted optional parts print as
+ * "nil" (a missing for-clause) or "(empty)" (a null statement). Deterministic, so
+ * tests compare against a literal. Same ownership/return contract as
+ * qcc_expr_dump.
+ */
+qcc_status qcc_stmt_dump(const qcc_stmt *stmt, char **out, size_t *len);
 
 #endif /* QCC_AST_AST_H */

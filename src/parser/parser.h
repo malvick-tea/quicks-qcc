@@ -7,7 +7,7 @@
  * recursive-descent parser with precedence climbing for the operator cascade
  * (ADR-0019). It is delivered in units, front of the grammar first.
  *
- * Scope so far (ADR-0019 Unit 1, ADR-0022 Unit 2)
+ * Scope so far (ADR-0019 Unit 1, ADR-0022 Unit 2, ADR-0023 Unit 3)
  *   Unit 1 — the whole §6.5 expression grammar over identifiers, constants, and
  *   string literals: primary, postfix (`[]`, calls, `.`/`->`, `++`/`--`), unary
  *   (`++`/`--`, `& * + - ~ !`, `sizeof`), cast (§6.5.4), the fifteen binary
@@ -18,8 +18,15 @@
  *   (§6.7.7). The type-name parser also backs the §6.5 forms that need a type:
  *   the cast-expression and `sizeof(type-name)` / `_Alignof` (§6.5.3.4), chosen
  *   over the expression reading by the §6.7.8 typedef/keyword test, so `(T)x` is a
- *   cast and `(x)y` is not. Still deferred: compound literals and `_Generic`, and
- *   struct/union/enum *definitions* (only tag references are parsed).
+ *   cast and `(x)y` is not.
+ *   Unit 3 — statements (§6.8): compound statements with a block scope per `{ }`,
+ *   the declaration-or-statement choice at each block item, expression/null,
+ *   selection (`if`/`switch`), iteration (`while`/`do`/`for`), jump
+ *   (`goto`/`continue`/`break`/`return`), and labeled (`case`/`default`/identifier)
+ *   statements.
+ *   Still deferred: compound literals and `_Generic`, struct/union/enum
+ *   *definitions* (only tag references are parsed), and external definitions /
+ *   function bodies (§6.9, Unit 4).
  *
  * Ownership
  *   A qcc_parser borrows everything: the token array (which must stay valid, and
@@ -98,6 +105,20 @@ qcc_status qcc_parse_declaration(qcc_parser *parser, qcc_decl_list *out);
  * Returns QCC_OK, QCC_ERR_PARSE, QCC_ERR_OUT_OF_MEMORY, or QCC_ERR_INVALID_ARGUMENT.
  */
 qcc_status qcc_parse_type_name(qcc_parser *parser, const qcc_type **out);
+
+/*
+ * Parse one statement (§6.8) at the cursor — a compound statement and its block
+ * items, a selection/iteration/jump statement, a labeled statement, or an
+ * expression/null statement — leaving the cursor after it. *out receives the tree
+ * (allocated from the parser's ast). A compound statement (and a `for` with a
+ * declaration in its first clause) opens and closes a block scope, so declaration
+ * parsing and the §6.7.8 typedef test work at the right depth; the parser must
+ * therefore have a type context and symbol table. Returns QCC_OK; on a syntax
+ * error a diagnostic was emitted and the return is QCC_ERR_PARSE;
+ * QCC_ERR_OUT_OF_MEMORY on a hard fault; QCC_ERR_INVALID_ARGUMENT if no type
+ * ctx/symtab was provided. *out is NULL unless QCC_OK.
+ */
+qcc_status qcc_parse_statement(qcc_parser *parser, qcc_stmt **out);
 
 /* Whether the cursor looks at the start of a declaration (a declaration-specifier
    keyword or a visible typedef-name) — the §6.7.8 declaration-vs-expression test. */
