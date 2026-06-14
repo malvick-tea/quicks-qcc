@@ -190,10 +190,10 @@ struct qcc_source;
  * §5.1.1.2). It differs from a preprocessing token in exactly the ways §6.4 ¶3
  * does: an identifier that spells a keyword has become a keyword (§6.4.1 ¶2), and
  * a pp-number (the over-broad §6.4.8 shape) has been classified as an integer or
- * floating constant (§6.4.4). Evaluated constant *values* (the integer/floating/
- * character value, the decoded string bytes) are added as the `convert` units
- * that compute them land (ADR-0017); until then a constant token is told apart by
- * `kind` and carries its source lexeme in `spelling`.
+ * floating constant (§6.4.4). A constant token carries both its source lexeme in
+ * `spelling` and its evaluated *value* (the integer/floating/character value, or
+ * the decoded string code units) in the value fields below, computed by the
+ * `convert` units (ADR-0017).
  *
  * Like a preprocessing token it is a plain value (copy freely). `spelling` is
  * interned by the producing `convert` and valid for that stage's lifetime;
@@ -233,6 +233,17 @@ typedef enum qcc_float_type {
     QCC_FLOAT_LDOUBLE      /* long double (l / L)     */
 } qcc_float_type;
 
+/* The encoding of a character constant or string literal, set by its prefix
+   (§6.4.4.4 ¶2, §6.4.5 ¶3): none, L (wchar_t), u (char16_t), U (char32_t), and
+   u8 (UTF-8, strings only). */
+typedef enum qcc_char_encoding {
+    QCC_ENC_PLAIN = 0,  /* (none)            */
+    QCC_ENC_WIDE,       /* L  -> wchar_t     */
+    QCC_ENC_CHAR16,     /* u  -> char16_t    */
+    QCC_ENC_CHAR32,     /* U  -> char32_t    */
+    QCC_ENC_UTF8        /* u8 -> char (UTF-8); string literals only */
+} qcc_char_encoding;
+
 typedef struct qcc_token {
     qcc_token_kind           kind;
     qcc_keyword              keyword;      /* Valid iff kind == QCC_TOKEN_KEYWORD. */
@@ -252,11 +263,23 @@ typedef struct qcc_token {
      *                            (§6.4.4.1), valid iff kind == QCC_TOKEN_INTEGER.
      *   float_value/float_type : value and type of a floating constant
      *                            (§6.4.4.2), valid iff kind == QCC_TOKEN_FLOATING.
+     *   int_value/char_encoding: for a character constant (§6.4.4.4), valid iff
+     *                            kind == QCC_TOKEN_CHAR — int_value is the value
+     *                            and char_encoding the prefix (PLAIN is type int).
+     *   str_data/str_len/char_encoding: for a string literal (§6.4.5), valid iff
+     *                            kind == QCC_TOKEN_STRING — str_data points at
+     *                            str_len code units (excluding the §6.4.5 ¶6 zero
+     *                            terminator that follows them) of
+     *                            qcc_encoding_unit_size(char_encoding) bytes each,
+     *                            in target (little-endian) order; NULL otherwise.
      */
     uint64_t                 int_value;
     qcc_int_type             int_type;
     double                   float_value;
     qcc_float_type           float_type;
+    qcc_char_encoding        char_encoding;
+    const void              *str_data;
+    size_t                   str_len;
 } qcc_token;
 
 /* Stable lowercase name of a token kind ("keyword", "integer-constant", …). */

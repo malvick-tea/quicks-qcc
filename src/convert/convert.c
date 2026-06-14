@@ -1,20 +1,24 @@
 /*
  * qcc — convert: preprocessing tokens to tokens (implementation).
  *
- * See convert.h and ADR-0017. This is Unit A: reclassification. Each
- * preprocessing token becomes a token of the corresponding §6.4 category, with
- * two real decisions — an identifier that spells a keyword becomes a keyword
- * (§6.4.1 ¶2), and a pp-number is classified as an integer or floating constant
- * by its §6.4.8 shape (§6.4.4) — and stray tokens that §6.4 ¶3 forbids in a
- * program are diagnosed. Constant values and string concatenation land in later
- * units; a constant token here carries its source lexeme.
+ * See convert.h and ADR-0017. Each preprocessing token becomes a token of the
+ * corresponding §6.4 category, with two real decisions — an identifier that
+ * spells a keyword becomes a keyword (§6.4.1 ¶2), and a pp-number is classified
+ * as an integer or floating constant by its §6.4.8 shape (§6.4.4) — and stray
+ * tokens that §6.4 ¶3 forbids in a program are diagnosed. Constant values are
+ * then evaluated: integer/floating (internal/intconst, internal/floatconst),
+ * character (internal/charconst), and string literals with phase-6 concatenation
+ * of adjacent literals (internal/strlit), the last two using the execution-set
+ * encoding model of ADR-0018.
  */
 #include "convert/convert.h"
 
 #include <stdlib.h>
 
+#include "convert/internal/charconst.h"
 #include "convert/internal/floatconst.h"
 #include "convert/internal/intconst.h"
+#include "convert/internal/strlit.h"
 
 /* The token list. */
 
@@ -147,6 +151,9 @@ static qcc_status fill_token(qcc_convert *cv, const qcc_ptok *in,
     out->int_type      = QCC_INT_INT;
     out->float_value   = 0.0;
     out->float_type    = QCC_FLOAT_DOUBLE;
+    out->char_encoding = QCC_ENC_PLAIN;
+    out->str_data      = NULL;
+    out->str_len       = 0;
     return QCC_OK;
 }
 
@@ -168,6 +175,9 @@ static qcc_token eof_token(const qcc_ptok *in)
     t.int_type      = QCC_INT_INT;
     t.float_value   = 0.0;
     t.float_type    = QCC_FLOAT_DOUBLE;
+    t.char_encoding = QCC_ENC_PLAIN;
+    t.str_data      = NULL;
+    t.str_len       = 0;
     return t;
 }
 
@@ -188,6 +198,33 @@ qcc_status qcc_convert_run(qcc_convert *cv, const qcc_ptok_list *in,
             return qcc_token_list_push(out, &eof); /* EOF terminates the stream. */
         }
 
+        /* A run of adjacent string literals is one literal after phase 6
+           (§5.1.1.2, §6.4.5 ¶5): gather it, evaluate the concatenation, and emit
+           a single STRING token located at the first piece. */
+        if (t->kind == QCC_PP_TOKEN_STRING_LIT) {
+            size_t j = i;
+            while (j < in->count &&
+                   in->items[j].kind == QCC_PP_TOKEN_STRING_LIT) {
+                ++j;
+            }
+            qcc_token tok;
+            qcc_status st = fill_token(cv, t, QCC_TOKEN_STRING, &tok);
+            if (st != QCC_OK) {
+                return st;
+            }
+            st = qcc_eval_string(&cv->arena, &in->items[i], j - i, cv->diags,
+                                 &tok.str_data, &tok.str_len, &tok.char_encoding);
+            if (st != QCC_OK) {
+                return st;
+            }
+            st = qcc_token_list_push(out, &tok);
+            if (st != QCC_OK) {
+                return st;
+            }
+            i = j - 1; /* The loop's ++i steps past the whole run. */
+            continue;
+        }
+
         qcc_token_kind kind = QCC_TOKEN_PUNCT;
         qcc_keyword    kw   = QCC_KW_NONE;
 
@@ -203,8 +240,8 @@ qcc_status qcc_convert_run(qcc_convert *cv, const qcc_ptok_list *in,
             kind = QCC_TOKEN_CHAR;
             break;
         case QCC_PP_TOKEN_STRING_LIT:
-            kind = QCC_TOKEN_STRING;
-            break;
+            /* Handled before the switch (gathered into a run); unreachable. */
+            continue;
         case QCC_PP_TOKEN_PUNCT:
             kind = QCC_TOKEN_PUNCT;
             break;
@@ -247,6 +284,13 @@ qcc_status qcc_convert_run(qcc_convert *cv, const qcc_ptok_list *in,
             st = qcc_eval_floating(tok.spelling, tok.spelling_len, t->source,
                                    t->offset, cv->diags, &tok.float_value,
                                    &tok.float_type);
+            if (st != QCC_OK) {
+                return st;
+            }
+        } else if (kind == QCC_TOKEN_CHAR) {
+            st = qcc_eval_char(tok.spelling, tok.spelling_len, t->source,
+                               t->offset, cv->diags, &tok.int_value,
+                               &tok.char_encoding);
             if (st != QCC_OK) {
                 return st;
             }

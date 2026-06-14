@@ -8,6 +8,7 @@
  */
 #include "qtest.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "convert/convert.h"
@@ -282,6 +283,229 @@ static void test_floating_values(void)
     ctx_free(&c);
 }
 
+/* Character constants get a value and an encoding (§6.4.4.4). */
+static void chk_char(const qcc_token_list *t, size_t i, int64_t value,
+                     qcc_char_encoding enc)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        QTEST_CHECK_EQ_INT(t->items[i].kind, QCC_TOKEN_CHAR, "char kind");
+        QTEST_CHECK_EQ_INT((int64_t)t->items[i].int_value, value, "char value");
+        QTEST_CHECK_EQ_INT(t->items[i].char_encoding, enc, "char encoding");
+    }
+}
+
+static void test_char_values(void)
+{
+    cvctx c;
+    /* Plain constants: int value of the (signed) char; escapes; octal/hex. */
+    do_convert("'a' '\\n' '\\0' '\\101' '\\x41'\n", &c);
+    chk_char(&c.toks, 0, 'a', QCC_ENC_PLAIN);   /* 97               */
+    chk_char(&c.toks, 1, 10, QCC_ENC_PLAIN);    /* newline          */
+    chk_char(&c.toks, 2, 0, QCC_ENC_PLAIN);     /* NUL              */
+    chk_char(&c.toks, 3, 65, QCC_ENC_PLAIN);    /* octal  \101 = A  */
+    chk_char(&c.toks, 4, 65, QCC_ENC_PLAIN);    /* hex    \x41 = A  */
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* char is signed on the target: a high-bit byte sign-extends to int. */
+    do_convert("'\\xFF'\n", &c);
+    chk_char(&c.toks, 0, -1, QCC_ENC_PLAIN);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* Multi-character constant: implementation-defined, packed big-endian; a
+       warning, not an error. */
+    do_convert("'ab'\n", &c);
+    chk_char(&c.toks, 0, 0x6162, QCC_ENC_PLAIN); /* 'a'<<8 | 'b'    */
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "multi-char is a warning");
+    ctx_free(&c);
+
+    /* Wide/u/U constants carry the prefix encoding; a UCN is one code point. */
+    do_convert("L'x' u'A' U'A' L'\\u00e9' U'\\U0001F600'\n", &c);
+    chk_char(&c.toks, 0, 'x', QCC_ENC_WIDE);
+    chk_char(&c.toks, 1, 'A', QCC_ENC_CHAR16);
+    chk_char(&c.toks, 2, 'A', QCC_ENC_CHAR32);
+    chk_char(&c.toks, 3, 0xE9, QCC_ENC_WIDE);      /* é, single unit  */
+    chk_char(&c.toks, 4, 0x1F600, QCC_ENC_CHAR32); /* 😀, fits 32-bit  */
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* A wide multi-character constant keeps the last unit (impl-defined, warn). */
+    do_convert("L'ab'\n", &c);
+    chk_char(&c.toks, 0, 'b', QCC_ENC_WIDE);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "wide multi-char is a warning");
+    ctx_free(&c);
+}
+
+/* Malformed character constants are diagnosed. */
+static void test_char_errors(void)
+{
+    cvctx c;
+    do_convert("'\\x100'\n", &c); /* 256 does not fit unsigned char. */
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "narrow escape out of range");
+    ctx_free(&c);
+
+    do_convert("u'\\U0001F600'\n", &c); /* non-BMP in a 16-bit char16_t. */
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "char16 out of range");
+    ctx_free(&c);
+}
+
+/* String literals carry decoded code units and a terminator (§6.4.5). A narrow
+   string is UTF-8 bytes; str_len excludes the appended NUL. */
+static void chk_str8(const qcc_token_list *t, size_t i, qcc_char_encoding enc,
+                     const char *bytes, size_t n)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        const qcc_token     *tk = &t->items[i];
+        const unsigned char *d  = (const unsigned char *)tk->str_data;
+        QTEST_CHECK_EQ_INT(tk->kind, QCC_TOKEN_STRING, "string kind");
+        QTEST_CHECK_EQ_INT(tk->char_encoding, enc, "string encoding");
+        QTEST_CHECK_EQ_UINT(tk->str_len, n, "string length");
+        int ok = (d != NULL);
+        for (size_t k = 0; ok && k < n; ++k) {
+            ok = (d[k] == (unsigned char)bytes[k]);
+        }
+        QTEST_CHECK_TRUE(ok);
+        if (d != NULL) {
+            QTEST_CHECK_EQ_INT(d[n], 0, "NUL terminator"); /* §6.4.5 ¶6 */
+        }
+    }
+}
+
+/* Compare a wide (32-bit unit) string against expected code units. */
+static void chk_str32(const qcc_token_list *t, size_t i, qcc_char_encoding enc,
+                      const uint32_t *units, size_t n)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        const qcc_token *tk = &t->items[i];
+        const uint32_t  *d  = (const uint32_t *)tk->str_data;
+        QTEST_CHECK_EQ_INT(tk->char_encoding, enc, "wide string encoding");
+        QTEST_CHECK_EQ_UINT(tk->str_len, n, "wide string length");
+        int ok = (d != NULL);
+        for (size_t k = 0; ok && k < n; ++k) {
+            ok = (d[k] == units[k]);
+        }
+        QTEST_CHECK_TRUE(ok);
+        if (d != NULL) {
+            QTEST_CHECK_EQ_UINT(d[n], 0u, "wide NUL terminator");
+        }
+    }
+}
+
+/* Compare a char16_t (16-bit unit) string against expected code units. */
+static void chk_str16(const qcc_token_list *t, size_t i, const uint16_t *units,
+                      size_t n)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        const qcc_token *tk = &t->items[i];
+        const uint16_t  *d  = (const uint16_t *)tk->str_data;
+        QTEST_CHECK_EQ_INT(tk->char_encoding, QCC_ENC_CHAR16, "u string encoding");
+        QTEST_CHECK_EQ_UINT(tk->str_len, n, "u string length");
+        int ok = (d != NULL);
+        for (size_t k = 0; ok && k < n; ++k) {
+            ok = (d[k] == units[k]);
+        }
+        QTEST_CHECK_TRUE(ok);
+        if (d != NULL) {
+            QTEST_CHECK_EQ_UINT(d[n], 0u, "u NUL terminator");
+        }
+    }
+}
+
+static void test_string_values(void)
+{
+    cvctx c;
+    /* Plain strings, escapes, and the empty string (just a terminator). The `;`
+       separators keep these from concatenating (adjacency is tested elsewhere);
+       so the string tokens land at even indices. */
+    do_convert("\"hi\"; \"\\101\\102\"; \"a\\tb\"; \"\";\n", &c);
+    chk_str8(&c.toks, 0, QCC_ENC_PLAIN, "hi", 2);
+    chk_str8(&c.toks, 2, QCC_ENC_PLAIN, "AB", 2);        /* octal escapes    */
+    chk_str8(&c.toks, 4, QCC_ENC_PLAIN, "a\tb", 3);
+    chk_str8(&c.toks, 6, QCC_ENC_PLAIN, "", 0);          /* "" -> just NUL   */
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* A universal character name is UTF-8-encoded in a narrow string. */
+    do_convert("\"\\u00e9\"\n", &c); /* é = U+00E9 -> C3 A9 */
+    chk_str8(&c.toks, 0, QCC_ENC_PLAIN, "\xC3\xA9", 2);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* A hex escape is a raw byte, not a code point: \xff stays one byte. */
+    do_convert("\"\\xff\"\n", &c);
+    chk_str8(&c.toks, 0, QCC_ENC_PLAIN, "\xFF", 1);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+}
+
+static void test_string_encodings(void)
+{
+    cvctx c;
+    /* Wide and UTF-32 strings: one 32-bit unit per character. Separated by `;`
+       so the differing prefixes do not trigger a concatenation mismatch. */
+    do_convert("L\"AB\"; U\"A\";\n", &c);
+    {
+        const uint32_t ab[] = { 'A', 'B' };
+        const uint32_t a[]  = { 'A' };
+        chk_str32(&c.toks, 0, QCC_ENC_WIDE, ab, 2);
+        chk_str32(&c.toks, 2, QCC_ENC_CHAR32, a, 1);
+    }
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* char16_t with a non-BMP code point becomes a UTF-16 surrogate pair. */
+    do_convert("u\"\\U0001F600\"\n", &c);
+    {
+        const uint16_t pair[] = { 0xD83D, 0xDE00 };
+        chk_str16(&c.toks, 0, pair, 2);
+    }
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* u8 string: a UCN is UTF-8-encoded into bytes. */
+    do_convert("u8\"\\u00e9\"\n", &c);
+    chk_str8(&c.toks, 0, QCC_ENC_UTF8, "\xC3\xA9", 2);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+}
+
+/* Adjacent string literals are concatenated (phase 6, §6.4.5 ¶5). */
+static void test_string_concat(void)
+{
+    cvctx c;
+    /* Three plain pieces become one literal; the result has a single EOF after. */
+    do_convert("\"ab\" \"cd\" \"e\"\n", &c);
+    QTEST_CHECK_EQ_UINT(c.toks.count, 2, "one string + EOF");
+    chk_str8(&c.toks, 0, QCC_ENC_PLAIN, "abcde", 5);
+    QTEST_CHECK_EQ_INT(c.toks.items[1].kind, QCC_TOKEN_EOF, "eof");
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* Concatenated escapes decode across the join: "\101" "B" is "AB". */
+    do_convert("\"\\101\" \"B\"\n", &c);
+    chk_str8(&c.toks, 0, QCC_ENC_PLAIN, "AB", 2);
+    ctx_free(&c);
+
+    /* An unprefixed piece takes the wide prefix of its neighbour. */
+    do_convert("\"a\" L\"b\"\n", &c);
+    {
+        const uint32_t ab[] = { 'a', 'b' };
+        chk_str32(&c.toks, 0, QCC_ENC_WIDE, ab, 2);
+    }
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* Two different non-empty prefixes are a diagnosed mix. */
+    do_convert("L\"a\" u\"b\"\n", &c);
+    QTEST_CHECK_EQ_UINT(c.errors, 1, "mismatched encoding prefixes");
+    ctx_free(&c);
+}
+
 /* An empty translation unit converts to just EOF. */
 static void test_empty(void)
 {
@@ -323,6 +547,11 @@ int main(void)
     test_integer_values();
     test_integer_errors();
     test_floating_values();
+    test_char_values();
+    test_char_errors();
+    test_string_values();
+    test_string_encodings();
+    test_string_concat();
     test_empty();
     test_invalid_args();
     return qtest_report("convert");

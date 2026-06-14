@@ -9,14 +9,16 @@
  * integer or floating constant (§6.4.4) — evaluate constant values (§6.4.4), and
  * concatenate adjacent string literals (§5.1.1.2 phase 6).
  *
- * Staged delivery (ADR-0017). This module lands in units:
+ * Staged delivery (ADR-0017), all units now landed:
  *   A. reclassification — keyword resolution, pp-number shape classification,
- *      and the trivial category shifts, with stray-token diagnostics. (here)
+ *      and the trivial category shifts, with stray-token diagnostics.
  *   B. integer/floating constant value + type (§6.4.4.1/.2).
- *   C. character/string value with escape decoding (§6.4.4.4/§6.4.5) and the
- *      phase-6 concatenation of adjacent string literals.
- * Until B/C land, a constant token is identified by `kind` and carries its source
- * lexeme in `spelling` (token.h); no value fields exist yet.
+ *   C. character/string value with escape decoding (§6.4.4.4/§6.4.5, encoding
+ *      model in ADR-0018) and the phase-6 concatenation of adjacent string
+ *      literals.
+ * A constant token now carries both its source lexeme in `spelling` and its
+ * evaluated value (the integer/floating/character value, or the decoded string
+ * code units) in the value fields of qcc_token (token.h).
  *
  * Ownership
  *   A qcc_convert owns an arena and an interner; every output token's `spelling`
