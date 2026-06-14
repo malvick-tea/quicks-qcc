@@ -13,6 +13,7 @@
 
 #include <stdlib.h>
 
+#include "convert/internal/floatconst.h"
 #include "convert/internal/intconst.h"
 
 /* The token list. */
@@ -144,6 +145,8 @@ static qcc_status fill_token(qcc_convert *cv, const qcc_ptok *in,
     out->leading_space = in->leading_space;
     out->int_value     = 0;
     out->int_type      = QCC_INT_INT;
+    out->float_value   = 0.0;
+    out->float_type    = QCC_FLOAT_DOUBLE;
     return QCC_OK;
 }
 
@@ -163,6 +166,8 @@ static qcc_token eof_token(const qcc_ptok *in)
     t.leading_space = 0;
     t.int_value     = 0;
     t.int_type      = QCC_INT_INT;
+    t.float_value   = 0.0;
+    t.float_type    = QCC_FLOAT_DOUBLE;
     return t;
 }
 
@@ -230,11 +235,18 @@ qcc_status qcc_convert_run(qcc_convert *cv, const qcc_ptok_list *in,
         }
         tok.keyword = kw; /* QCC_KW_NONE except for a keyword token. */
 
-        /* Evaluate an integer constant's value and type (§6.4.4.1). */
+        /* Evaluate the constant's value and type (§6.4.4). */
         if (kind == QCC_TOKEN_INTEGER) {
             st = qcc_eval_integer(tok.spelling, tok.spelling_len, t->source,
                                   t->offset, cv->diags, &tok.int_value,
                                   &tok.int_type);
+            if (st != QCC_OK) {
+                return st;
+            }
+        } else if (kind == QCC_TOKEN_FLOATING) {
+            st = qcc_eval_floating(tok.spelling, tok.spelling_len, t->source,
+                                   t->offset, cv->diags, &tok.float_value,
+                                   &tok.float_type);
             if (st != QCC_OK) {
                 return st;
             }

@@ -36,10 +36,16 @@ against the x86-64 LP64 widths (int 32, long/long long 64). Bad digits, invalid
 suffixes, and out-of-range values are diagnosed; evaluation is best-effort so
 conversion continues.
 
-**Staged next (ADR-0017):** the floating half of Unit B — floating-constant value
-and type (§6.4.4.2); Unit C — character/string value with escape decoding
+**Floating constants (§6.4.4.2):** a FLOATING token carries its `float_value` and
+`float_type` (double / float / long double, set by the f/l suffix).
+`internal/floatconst` reads the suffix and hands the numeric part — decimal or
+C99 hex float — to the host `strtod` (a seed-CRT dependency, ADR-0009, to be
+replaced by our own correctly-rounded parser when self-hosting needs it);
+malformed or out-of-range constants are diagnosed.
+
+**Staged next (ADR-0017):** Unit C — character/string value with escape decoding
 (§6.4.4.4, §6.4.5) and the phase-6 concatenation of adjacent string literals.
-Until then those constant tokens carry their lexeme and are told apart by `kind`.
+Until then a char/string token carries its lexeme and is told apart by `kind`.
 
 **Key invariants:** output token spellings are interned through the converter's
 own `arena`/`intern`, so the token stream owns its spellings independently of the

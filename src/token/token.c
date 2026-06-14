@@ -56,6 +56,16 @@ const char *qcc_int_type_name(qcc_int_type type)
     return "unknown";
 }
 
+const char *qcc_float_type_name(qcc_float_type type)
+{
+    switch (type) {
+    case QCC_FLOAT_DOUBLE:  return "double";
+    case QCC_FLOAT_FLOAT:   return "float";
+    case QCC_FLOAT_LDOUBLE: return "long double";
+    }
+    return "unknown";
+}
+
 /*
  * Primary spellings, indexed by qcc_punct. The order MUST match the enum in
  * token.h exactly; test_token locks the correspondence down entry by entry so

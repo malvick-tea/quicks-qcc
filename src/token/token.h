@@ -225,6 +225,14 @@ typedef enum qcc_int_type {
     QCC_INT_ULLONG     /* unsigned long long */
 } qcc_int_type;
 
+/* The type of a floating constant (§6.4.4.2 ¶4), set by its suffix: a plain
+   constant is double, an `f`/`F` suffix makes it float, an `l`/`L` long double. */
+typedef enum qcc_float_type {
+    QCC_FLOAT_DOUBLE = 0,  /* double      (no suffix) */
+    QCC_FLOAT_FLOAT,       /* float       (f / F)     */
+    QCC_FLOAT_LDOUBLE      /* long double (l / L)     */
+} qcc_float_type;
+
 typedef struct qcc_token {
     qcc_token_kind           kind;
     qcc_keyword              keyword;      /* Valid iff kind == QCC_TOKEN_KEYWORD. */
@@ -240,11 +248,15 @@ typedef struct qcc_token {
     /*
      * Evaluated constant value, filled by the `convert` units that compute it
      * (ADR-0017); zero/default for other kinds.
-     *   int_value/int_type : the value and type of an integer constant
-     *                        (§6.4.4.1), valid iff kind == QCC_TOKEN_INTEGER.
+     *   int_value/int_type     : value and type of an integer constant
+     *                            (§6.4.4.1), valid iff kind == QCC_TOKEN_INTEGER.
+     *   float_value/float_type : value and type of a floating constant
+     *                            (§6.4.4.2), valid iff kind == QCC_TOKEN_FLOATING.
      */
     uint64_t                 int_value;
     qcc_int_type             int_type;
+    double                   float_value;
+    qcc_float_type           float_type;
 } qcc_token;
 
 /* Stable lowercase name of a token kind ("keyword", "integer-constant", …). */
@@ -252,6 +264,9 @@ const char *qcc_token_kind_name(qcc_token_kind kind);
 
 /* Stable C spelling of an integer-constant type ("int", "unsigned long", …). */
 const char *qcc_int_type_name(qcc_int_type type);
+
+/* Stable C spelling of a floating-constant type ("double", "float", …). */
+const char *qcc_float_type_name(qcc_float_type type);
 
 /*
  * Canonical (primary) spelling of a punctuator — "[" for QCC_PUNCT_LBRACKET

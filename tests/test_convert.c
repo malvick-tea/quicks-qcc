@@ -247,6 +247,41 @@ static void test_integer_errors(void)
     ctx_free(&c);
 }
 
+/* Floating constants get a value and a type (§6.4.4.2). */
+static void chk_float(const qcc_token_list *t, size_t i, double value,
+                      qcc_float_type type)
+{
+    QTEST_CHECK_TRUE(i < t->count);
+    if (i < t->count) {
+        QTEST_CHECK_EQ_INT(t->items[i].kind, QCC_TOKEN_FLOATING, "floating kind");
+        QTEST_CHECK_TRUE(t->items[i].float_value == value);
+        QTEST_CHECK_EQ_INT(t->items[i].float_type, type, "float type");
+    }
+}
+
+static void test_floating_values(void)
+{
+    cvctx c;
+    /* Decimal forms and the default double type (values are exact in binary). */
+    do_convert("1.5 .5 1e2 1.0 0x1p4\n", &c);
+    chk_float(&c.toks, 0, 1.5, QCC_FLOAT_DOUBLE);
+    chk_float(&c.toks, 1, 0.5, QCC_FLOAT_DOUBLE);
+    chk_float(&c.toks, 2, 100.0, QCC_FLOAT_DOUBLE);
+    chk_float(&c.toks, 3, 1.0, QCC_FLOAT_DOUBLE);
+    chk_float(&c.toks, 4, 16.0, QCC_FLOAT_DOUBLE);  /* hex float */
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+
+    /* Suffixes fix the type. */
+    do_convert("1.0f 2.5F 3.0l 4.0L\n", &c);
+    chk_float(&c.toks, 0, 1.0, QCC_FLOAT_FLOAT);
+    chk_float(&c.toks, 1, 2.5, QCC_FLOAT_FLOAT);
+    chk_float(&c.toks, 2, 3.0, QCC_FLOAT_LDOUBLE);
+    chk_float(&c.toks, 3, 4.0, QCC_FLOAT_LDOUBLE);
+    QTEST_CHECK_EQ_UINT(c.errors, 0, "no errors");
+    ctx_free(&c);
+}
+
 /* An empty translation unit converts to just EOF. */
 static void test_empty(void)
 {
@@ -287,6 +322,7 @@ int main(void)
     test_stray_token();
     test_integer_values();
     test_integer_errors();
+    test_floating_values();
     test_empty();
     test_invalid_args();
     return qtest_report("convert");
