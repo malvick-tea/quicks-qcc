@@ -1161,13 +1161,74 @@ int qcc_parser_at_declaration(const qcc_parser *p)
 {
     const qcc_token *t = peek(p);
     if (t->kind == QCC_TOKEN_KEYWORD) {
-        return is_decl_specifier_keyword(t->keyword);
+        /* _Static_assert is a (static_assert-)declaration, §6.7.10. */
+        return is_decl_specifier_keyword(t->keyword) ||
+               t->keyword == QCC_KW_STATIC_ASSERT;
     }
     if (t->kind == QCC_TOKEN_IDENTIFIER) {
         return p->syms != NULL &&
                qcc_symtab_is_typedef_name(p->syms, t->spelling, t->spelling_len);
     }
     return 0;
+}
+
+/*
+ * static_assert-declaration (§6.7.10): `_Static_assert ( constant-expression ,
+ * string-literal ) ;`. The controlling expression is an integer constant
+ * expression (§6.6), evaluated now via the constant evaluator (ADR-0025); a zero
+ * value fails the assertion and is diagnosed with the string-literal message. It
+ * declares no entity, so it contributes nothing to the declarator list.
+ */
+static qcc_status parse_static_assert(qcc_parser *p)
+{
+    const qcc_token *kw = peek(p);
+    advance(p); /* _Static_assert */
+    if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after _Static_assert")) {
+        return QCC_ERR_PARSE;
+    }
+    qcc_expr *cond = parse_conditional(p);
+    if (cond == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+    if (!expect_punct(p, QCC_PUNCT_COMMA, "expected ',' in _Static_assert")) {
+        return QCC_ERR_PARSE;
+    }
+    const qcc_token *msg = peek(p);
+    if (msg->kind != QCC_TOKEN_STRING) {
+        parse_error(p, msg, "expected a string literal in _Static_assert");
+        return QCC_ERR_PARSE;
+    }
+    advance(p);
+    if (!expect_punct(p, QCC_PUNCT_RPAREN, "expected ')' after _Static_assert") ||
+        !expect_punct(p, QCC_PUNCT_SEMI, "expected ';' after _Static_assert")) {
+        return QCC_ERR_PARSE;
+    }
+
+    qcc_const_value cv;
+    if (qcc_eval_const_int(cond, &cv) != QCC_OK) {
+        parse_error(p, kw, "_Static_assert expression is not an integer "
+                           "constant expression");
+        return QCC_ERR_PARSE;
+    }
+    if (cv.value == 0) {
+        qcc_status st;
+        if ((msg->char_encoding == QCC_ENC_PLAIN ||
+             msg->char_encoding == QCC_ENC_UTF8) &&
+            msg->str_data != NULL) {
+            st = qcc_diag_emit(p->diags, QCC_DIAG_ERROR, kw->source, kw->offset,
+                               tok_span(kw), "static assertion failed: %.*s",
+                               (int)msg->str_len, (const char *)msg->str_data);
+        } else {
+            st = qcc_diag_emit(p->diags, QCC_DIAG_ERROR, kw->source, kw->offset,
+                               tok_span(kw), "static assertion failed");
+        }
+        if (st != QCC_OK) {
+            p->oom = 1;
+        }
+        p->had_error = 1;
+        return QCC_ERR_PARSE;
+    }
+    return p->had_error ? QCC_ERR_PARSE : QCC_OK;
 }
 
 qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
@@ -1177,6 +1238,10 @@ qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
     }
     if (p->types == NULL || p->syms == NULL) {
         return QCC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (at_keyword(p, QCC_KW_STATIC_ASSERT)) {
+        return parse_static_assert(p);
     }
 
     const qcc_token *specloc = peek(p);
@@ -1812,6 +1877,12 @@ qcc_status qcc_parse_external_declaration(qcc_parser *p, qcc_extern_decl *out)
         return QCC_ERR_INVALID_ARGUMENT;
     }
     memset(out, 0, sizeof(*out));
+
+    /* A static_assert-declaration (§6.7.10) is the one external declaration with
+       no declaration-specifiers; route it through the declaration parser. */
+    if (at_keyword(p, QCC_KW_STATIC_ASSERT)) {
+        return parse_declaration_into_extern(p, out);
+    }
 
     size_t           start   = p->pos;
     const qcc_token *specloc = peek(p);

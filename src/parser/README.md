@@ -58,11 +58,15 @@ the body may recurse) and the body is parsed in a block scope that binds the
 parameter names — so a parameter shadowing a file-scope `typedef`-name flips the
 §6.7.8 test inside the body, as the standard requires.
 
+A `_Static_assert` declaration (§6.7.10) is parsed wherever a declaration may
+appear; its controlling expression is evaluated immediately by the `consteval`
+module (§6.6) and a zero value is diagnosed with the string-literal message.
+
 **Deferred:** compound literals and `_Generic` (§6.5); struct/union/enum
-*definitions* and brace/designated initializers (§6.7.9); `_Static_assert`
-(§6.7.10); the obsolescent K&R function-definition form (§6.9.1); panic-mode error
-recovery; and all semantic checks (a `break` outside a loop, an undefined `goto`
-target, controlling-expression types, redeclaration compatibility, …).
+*definitions* and brace/designated initializers (§6.7.9); the obsolescent K&R
+function-definition form (§6.9.1); panic-mode error recovery; and all semantic
+checks (a `break` outside a loop, an undefined `goto` target, controlling-
+expression types, redeclaration compatibility, …).
 
 **Error handling:** a syntax error is reported to the diag sink with a source
 location and the parse returns `QCC_ERR_PARSE` (a node-allocation failure returns

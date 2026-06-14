@@ -216,6 +216,21 @@ static void test_errors(void)
     chk_error("int f(int a");     /* missing ')' and ';' */
 }
 
+static void test_static_assert(void)
+{
+    /* A passing _Static_assert (§6.7.10) declares nothing — no decls, no error. */
+    chk("_Static_assert(1, \"ok\");", "");
+    chk("_Static_assert(sizeof(int) == 4, \"int is 4 bytes\");", "");
+    chk("_Static_assert(2 + 2 == 4, \"math\");", "");
+    /* It sits between ordinary declarations without contributing a declarator. */
+    chk("int x; _Static_assert(1, \"k\"); int y;", "x: int; y: int");
+    /* A false assertion, a non-constant expression, or a bad form is an error. */
+    chk_error("_Static_assert(0, \"boom\");");
+    chk_error("_Static_assert(2 > 3, \"no\");");
+    chk_error("_Static_assert(n, \"not constant\");");
+    chk_error("_Static_assert(1);"); /* missing message */
+}
+
 static void test_type_name_and_predicate(void)
 {
     /* at_declaration distinguishes a declaration from an expression. */
@@ -236,6 +251,7 @@ int main(void)
     test_typedef();
     test_struct_reference();
     test_initializer();
+    test_static_assert();
     test_errors();
     test_type_name_and_predicate();
     return qtest_report("decl");
