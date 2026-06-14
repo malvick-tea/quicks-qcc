@@ -168,7 +168,33 @@ static int cur_assign_op(const qcc_parser *p, qcc_punct *out)
 /* The expression grammar (§6.5). Mutually recursive; forward-declared. */
 static qcc_expr *parse_expression(qcc_parser *p);
 static qcc_expr *parse_assignment(qcc_parser *p);
+static qcc_expr *parse_cast(qcc_parser *p);
 static qcc_expr *parse_unary(qcc_parser *p);
+static int is_decl_specifier_keyword(qcc_keyword kw);
+/* The type-name parser (§6.7.7), defined with the declaration grammar below and
+   shared with the cast / sizeof / _Alignof hooks here. NULL on error (had_error
+   or oom set). */
+static const qcc_type *parse_type_name(qcc_parser *p);
+
+/* Does the current '(' open a type-name (a cast, or sizeof/_Alignof operand)?
+   True only when a type context exists and the token after '(' begins a
+   type-name — a declaration-specifier keyword or a visible typedef-name. */
+static int lparen_starts_type(const qcc_parser *p)
+{
+    if (p->types == NULL || !at_punct(p, QCC_PUNCT_LPAREN) ||
+        p->pos + 1 >= p->count) {
+        return 0;
+    }
+    const qcc_token *nx = &p->tokens[p->pos + 1];
+    if (nx->kind == QCC_TOKEN_KEYWORD) {
+        return is_decl_specifier_keyword(nx->keyword);
+    }
+    if (nx->kind == QCC_TOKEN_IDENTIFIER) {
+        return p->syms != NULL &&
+               qcc_symtab_is_typedef_name(p->syms, nx->spelling, nx->spelling_len);
+    }
+    return 0;
+}
 
 /* primary-expression (§6.5.1): identifier, constant, string, or ( expression ). */
 static qcc_expr *parse_primary(qcc_parser *p)
@@ -299,14 +325,34 @@ static qcc_expr *parse_postfix(qcc_parser *p)
     }
 }
 
-/* unary-expression (§6.5.3): prefix ++/--, & * + - ~ !, or sizeof expr. */
+/*
+ * unary-expression (§6.5.3). Per the grammar the operands differ by operator:
+ * `++`/`--` bind a *unary-expression*, while `& * + - ~ !` bind a
+ * *cast-expression* (so `-(int)x` negates the cast). `sizeof` takes either a
+ * unary-expression or a parenthesised type-name (§6.5.3.4); `_Alignof` takes only
+ * a parenthesised type-name. The type forms are recognised only when a type
+ * context exists and lparen_starts_type() confirms the '(' opens a type-name —
+ * otherwise `sizeof (x)` is sizeof of a parenthesised expression and '(' is an
+ * ordinary primary.
+ */
 static qcc_expr *parse_unary(qcc_parser *p)
 {
     const qcc_token *t = peek(p);
 
+    if (t->kind == QCC_TOKEN_PUNCT &&
+        (t->punct == QCC_PUNCT_PLUS_PLUS || t->punct == QCC_PUNCT_MINUS_MINUS)) {
+        advance(p);
+        qcc_expr *operand = parse_unary(p); /* ++/-- bind a unary-expression. */
+        if (operand == NULL) {
+            return NULL;
+        }
+        qcc_expr *e = qcc_expr_unary(p->ast, t->punct, operand, t);
+        return (e != NULL) ? e : fail_oom(p);
+    }
+
     if (t->kind == QCC_TOKEN_PUNCT && is_unary_prefix(t->punct)) {
         advance(p);
-        qcc_expr *operand = parse_unary(p);
+        qcc_expr *operand = parse_cast(p); /* & * + - ~ ! bind a cast-expression. */
         if (operand == NULL) {
             return NULL;
         }
@@ -315,9 +361,20 @@ static qcc_expr *parse_unary(qcc_parser *p)
     }
 
     if (t->kind == QCC_TOKEN_KEYWORD && t->keyword == QCC_KW_SIZEOF) {
-        /* sizeof(type-name) needs the type parser (Unit 2); here sizeof always
-           takes a unary-expression, so sizeof(x) reads as sizeof of (x). */
         advance(p);
+        if (lparen_starts_type(p)) {
+            advance(p); /* '(' */
+            const qcc_type *type = parse_type_name(p);
+            if (type == NULL) {
+                return NULL;
+            }
+            if (!expect_punct(p, QCC_PUNCT_RPAREN,
+                              "expected ')' after type name in sizeof")) {
+                return NULL;
+            }
+            qcc_expr *e = qcc_expr_sizeof_type(p->ast, type, t);
+            return (e != NULL) ? e : fail_oom(p);
+        }
         qcc_expr *operand = parse_unary(p);
         if (operand == NULL) {
             return NULL;
@@ -326,15 +383,69 @@ static qcc_expr *parse_unary(qcc_parser *p)
         return (e != NULL) ? e : fail_oom(p);
     }
 
+    if (t->kind == QCC_TOKEN_KEYWORD && t->keyword == QCC_KW_ALIGNOF) {
+        /* §6.5.3.4: _Alignof has only the `_Alignof ( type-name )` form. */
+        advance(p);
+        if (!expect_punct(p, QCC_PUNCT_LPAREN, "expected '(' after _Alignof")) {
+            return NULL;
+        }
+        const qcc_type *type = parse_type_name(p);
+        if (type == NULL) {
+            return NULL;
+        }
+        if (!expect_punct(p, QCC_PUNCT_RPAREN,
+                          "expected ')' after type name in _Alignof")) {
+            return NULL;
+        }
+        qcc_expr *e = qcc_expr_alignof_type(p->ast, type, t);
+        return (e != NULL) ? e : fail_oom(p);
+    }
+
     return parse_postfix(p);
 }
 
+/*
+ * cast-expression (§6.5.4): a unary-expression, or `( type-name ) cast-expression`
+ * (right-recursive, so `(int)(char)x` casts to char then to int). The leading '('
+ * is a cast only when lparen_starts_type() confirms a type context and a type-name
+ * token after it; otherwise the '(' falls through to the parenthesised-primary
+ * path. A compound literal `( type-name ) { ... }` (§6.5.2.5) shares this prefix
+ * but is not supported yet, so it is diagnosed rather than mis-parsed as a cast.
+ */
+static qcc_expr *parse_cast(qcc_parser *p)
+{
+    if (lparen_starts_type(p)) {
+        const qcc_token *lp = peek(p);
+        advance(p); /* '(' */
+        const qcc_type *type = parse_type_name(p);
+        if (type == NULL) {
+            return NULL;
+        }
+        if (!expect_punct(p, QCC_PUNCT_RPAREN,
+                          "expected ')' after type name in cast")) {
+            return NULL;
+        }
+        if (at_punct(p, QCC_PUNCT_LBRACE)) {
+            parse_error(p, peek(p), "compound literals are not supported yet");
+            return NULL;
+        }
+        qcc_expr *operand = parse_cast(p);
+        if (operand == NULL) {
+            return NULL;
+        }
+        qcc_expr *e = qcc_expr_cast(p->ast, type, operand, lp);
+        return (e != NULL) ? e : fail_oom(p);
+    }
+    return parse_unary(p);
+}
+
 /* The binary-operator cascade (§6.5.5-6.5.14) by precedence climbing: parse a
-   unary operand, then fold in operators of precedence >= min_prec, recursing one
-   level tighter for the right operand (left associativity). */
+   cast-expression operand (the tightest non-binary level, §6.5.5), then fold in
+   operators of precedence >= min_prec, recursing one level tighter for the right
+   operand (left associativity). */
 static qcc_expr *parse_binary(qcc_parser *p, int min_prec)
 {
-    qcc_expr *lhs = parse_unary(p);
+    qcc_expr *lhs = parse_cast(p);
     if (lhs == NULL) {
         return NULL;
     }
@@ -955,28 +1066,48 @@ static const qcc_type *parse_declarator(qcc_parser *p, const qcc_type *base,
     return parse_direct_declarator(p, type, abstract, out_name);
 }
 
-qcc_status qcc_parse_type_name(qcc_parser *p, const qcc_type **out)
+/* A type-name (§6.7.7): a specifier-qualifier list followed by an optional
+   abstract declarator (a declarator with no identifier). Returns the type, or
+   NULL with p->oom or p->had_error set. The single code path the public
+   qcc_parse_type_name and the cast / sizeof / _Alignof hooks share. */
+static const qcc_type *parse_type_name(qcc_parser *p)
 {
-    if (p == NULL || out == NULL) {
-        return QCC_ERR_INVALID_ARGUMENT;
-    }
     if (p->types == NULL) {
-        return QCC_ERR_INVALID_ARGUMENT;
+        /* A type-name cannot be built without a type context (expression-only
+           use, §6.7.7 needs the type module); diagnose instead of crashing. */
+        parse_error(p, peek(p), "a type name is not valid here");
+        return NULL;
     }
-    *out = NULL;
-
     const qcc_token *loc = peek(p);
     declspec         ds;
     parse_declaration_specifiers(p, &ds);
     if (p->oom) {
-        return QCC_ERR_OUT_OF_MEMORY;
+        return NULL;
     }
     const qcc_type *base = ds_base_type(p, &ds, loc);
     if (base == NULL) {
-        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+        return NULL;
     }
     const qcc_token *name = NULL;
     const qcc_type  *t    = parse_declarator(p, base, 1, &name);
+    if (t == NULL) {
+        return NULL;
+    }
+    if (name != NULL) {
+        /* §6.7.7: a type-name is an abstract declarator — it declares no name. */
+        parse_error(p, name, "a type name cannot declare an identifier");
+    }
+    return t;
+}
+
+qcc_status qcc_parse_type_name(qcc_parser *p, const qcc_type **out)
+{
+    if (p == NULL || out == NULL || p->types == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+
+    const qcc_type *t = parse_type_name(p);
     if (t == NULL) {
         return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
     }

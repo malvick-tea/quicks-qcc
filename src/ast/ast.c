@@ -106,6 +106,46 @@ qcc_expr *qcc_expr_sizeof(qcc_ast *ast, qcc_expr *operand, const qcc_token *loc)
     return e;
 }
 
+qcc_expr *qcc_expr_sizeof_type(qcc_ast *ast, const qcc_type *type,
+                               const qcc_token *loc)
+{
+    if (ast == NULL || type == NULL) {
+        return NULL;
+    }
+    qcc_expr *e = node_new(ast, QCC_EXPR_SIZEOF_TYPE, loc);
+    if (e != NULL) {
+        e->type_operand = type;
+    }
+    return e;
+}
+
+qcc_expr *qcc_expr_alignof_type(qcc_ast *ast, const qcc_type *type,
+                                const qcc_token *loc)
+{
+    if (ast == NULL || type == NULL) {
+        return NULL;
+    }
+    qcc_expr *e = node_new(ast, QCC_EXPR_ALIGNOF_TYPE, loc);
+    if (e != NULL) {
+        e->type_operand = type;
+    }
+    return e;
+}
+
+qcc_expr *qcc_expr_cast(qcc_ast *ast, const qcc_type *type, qcc_expr *operand,
+                        const qcc_token *loc)
+{
+    if (ast == NULL || type == NULL || operand == NULL) {
+        return NULL;
+    }
+    qcc_expr *e = node_new(ast, QCC_EXPR_CAST, loc);
+    if (e != NULL) {
+        e->type_operand = type;
+        e->a            = operand;
+    }
+    return e;
+}
+
 qcc_expr *qcc_expr_binary(qcc_ast *ast, qcc_punct op, qcc_expr *lhs,
                           qcc_expr *rhs, const qcc_token *loc)
 {
@@ -233,6 +273,9 @@ const char *qcc_expr_kind_name(qcc_expr_kind kind)
     case QCC_EXPR_POSTFIX:     return "postfix";
     case QCC_EXPR_UNARY:       return "unary";
     case QCC_EXPR_SIZEOF:      return "sizeof";
+    case QCC_EXPR_SIZEOF_TYPE: return "sizeof-type";
+    case QCC_EXPR_ALIGNOF_TYPE: return "alignof-type";
+    case QCC_EXPR_CAST:        return "cast";
     case QCC_EXPR_BINARY:      return "binary";
     case QCC_EXPR_CONDITIONAL: return "conditional";
     case QCC_EXPR_ASSIGN:      return "assign";
@@ -336,6 +379,19 @@ static int sb_putc(strbuf *b, char c)
     return sb_putn(b, &c, 1);
 }
 
+/* Append the readable form of a type (via qcc_type_print). */
+static int sb_put_type(strbuf *b, const qcc_type *t)
+{
+    char  *s   = NULL;
+    size_t n   = 0;
+    if (qcc_type_print(t, &s, &n) != QCC_OK) {
+        return 0;
+    }
+    int ok = sb_putn(b, s, n);
+    free(s);
+    return ok;
+}
+
 /* Recursively emit `e` as an S-expression. Returns 1 on success, 0 on OOM. */
 static int emit(strbuf *b, const qcc_expr *e)
 {
@@ -390,6 +446,15 @@ static int emit(strbuf *b, const qcc_expr *e)
     }
     case QCC_EXPR_SIZEOF:
         return sb_puts(b, "(sizeof ") && emit(b, e->a) && sb_putc(b, ')');
+    case QCC_EXPR_SIZEOF_TYPE:
+        return sb_puts(b, "(sizeof-type ") && sb_put_type(b, e->type_operand) &&
+               sb_putc(b, ')');
+    case QCC_EXPR_ALIGNOF_TYPE:
+        return sb_puts(b, "(alignof-type ") && sb_put_type(b, e->type_operand) &&
+               sb_putc(b, ')');
+    case QCC_EXPR_CAST:
+        return sb_puts(b, "(cast ") && sb_put_type(b, e->type_operand) &&
+               sb_putc(b, ' ') && emit(b, e->a) && sb_putc(b, ')');
     case QCC_EXPR_BINARY:
     case QCC_EXPR_ASSIGN:
         return sb_putc(b, '(') && sb_puts(b, qcc_punct_str(e->op)) &&

@@ -57,6 +57,9 @@ typedef enum qcc_expr_kind {
     QCC_EXPR_POSTFIX,      /* §6.5.2.4: a++ / a-- — `a` operand, `op` the punct. */
     QCC_EXPR_UNARY,        /* §6.5.3: ++a --a & * + - ~ ! a — `a`, `op`.         */
     QCC_EXPR_SIZEOF,       /* §6.5.3.4: sizeof of an expression — `a` operand.   */
+    QCC_EXPR_SIZEOF_TYPE,  /* §6.5.3.4: sizeof ( type-name ) — `type_operand`.   */
+    QCC_EXPR_ALIGNOF_TYPE, /* §6.5.3.4: _Alignof ( type-name ) — `type_operand`. */
+    QCC_EXPR_CAST,         /* §6.5.4: ( type-name ) a — `type_operand`, `a`.     */
     QCC_EXPR_BINARY,       /* §6.5.5-6.5.14: a op b — `op` the operator punct.   */
     QCC_EXPR_CONDITIONAL,  /* §6.5.15: a ? b : c.                                */
     QCC_EXPR_ASSIGN,       /* §6.5.16: a op b (op = = or a compound assignment). */
@@ -88,6 +91,7 @@ struct qcc_expr {
     qcc_punct                op;
 
     qcc_token                tok;
+    const qcc_type          *type_operand; /* CAST/SIZEOF_TYPE/ALIGNOF_TYPE.     */
 
     qcc_expr                *a;
     qcc_expr                *b;
@@ -137,6 +141,13 @@ qcc_expr *qcc_expr_unary(qcc_ast *ast, qcc_punct op, qcc_expr *operand,
 qcc_expr *qcc_expr_postfix(qcc_ast *ast, qcc_punct op, qcc_expr *operand,
                            const qcc_token *loc);
 qcc_expr *qcc_expr_sizeof(qcc_ast *ast, qcc_expr *operand, const qcc_token *loc);
+/* sizeof / _Alignof applied to a type-name (§6.5.3.4), and a cast (§6.5.4). */
+qcc_expr *qcc_expr_sizeof_type(qcc_ast *ast, const qcc_type *type,
+                               const qcc_token *loc);
+qcc_expr *qcc_expr_alignof_type(qcc_ast *ast, const qcc_type *type,
+                                const qcc_token *loc);
+qcc_expr *qcc_expr_cast(qcc_ast *ast, const qcc_type *type, qcc_expr *operand,
+                        const qcc_token *loc);
 qcc_expr *qcc_expr_binary(qcc_ast *ast, qcc_punct op, qcc_expr *lhs,
                           qcc_expr *rhs, const qcc_token *loc);
 qcc_expr *qcc_expr_assign(qcc_ast *ast, qcc_punct op, qcc_expr *lhs,

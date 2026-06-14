@@ -5,19 +5,21 @@
  * Recognise the C11 grammar over the `qcc_token` stream `convert` produces
  * (translation phase 7 output) and build a `qcc_ast` tree. This is a hand-written
  * recursive-descent parser with precedence climbing for the operator cascade
- * (ADR-0019). It is delivered in units, front of the grammar first; this first
- * unit parses the **expression** grammar (§6.5).
+ * (ADR-0019). It is delivered in units, front of the grammar first.
  *
- * Scope of this unit (ADR-0019 Unit 1)
- *   The whole §6.5 expression grammar over identifiers, constants, and string
- *   literals: primary, postfix (`[]`, calls, `.`/`->`, `++`/`--`), unary
- *   (`++`/`--`, `& * + - ~ !`, `sizeof` of an expression), the fifteen binary
+ * Scope so far (ADR-0019 Unit 1, ADR-0022 Unit 2)
+ *   Unit 1 — the whole §6.5 expression grammar over identifiers, constants, and
+ *   string literals: primary, postfix (`[]`, calls, `.`/`->`, `++`/`--`), unary
+ *   (`++`/`--`, `& * + - ~ !`, `sizeof`), cast (§6.5.4), the fifteen binary
  *   levels, the conditional operator, the right-associative assignments, and the
- *   comma operator. The type-name-dependent forms — cast, `sizeof(type-name)`,
- *   `_Alignof`, compound literals, `_Generic` — need the declaration/type parser
- *   and arrive with it (Unit 2); until then a `(` in a unary position always
- *   begins a parenthesised expression, which is unambiguous because no type names
- *   are declared yet.
+ *   comma operator.
+ *   Unit 2 — declarations (§6.7): declaration-specifiers, inside-out declarators
+ *   (pointer/array/function, nested), typedef-name resolution, and type-names
+ *   (§6.7.7). The type-name parser also backs the §6.5 forms that need a type:
+ *   the cast-expression and `sizeof(type-name)` / `_Alignof` (§6.5.3.4), chosen
+ *   over the expression reading by the §6.7.8 typedef/keyword test, so `(T)x` is a
+ *   cast and `(x)y` is not. Still deferred: compound literals and `_Generic`, and
+ *   struct/union/enum *definitions* (only tag references are parsed).
  *
  * Ownership
  *   A qcc_parser borrows everything: the token array (which must stay valid, and

@@ -12,6 +12,7 @@
 
 #include "ast/ast.h"
 #include "token/token.h"
+#include "type/type.h"
 
 static qcc_token id_tok(const char *spelling)
 {
@@ -110,6 +111,38 @@ static void test_operators(void)
     qcc_ast_dispose(&ast);
 }
 
+/* The type-dependent nodes (§6.5.3.4, §6.5.4) carry a qcc_type, rendered via
+   qcc_type_print, and so need a type context to construct. */
+static void test_type_operands(void)
+{
+    qcc_ast ast;
+    qcc_ast_init(&ast);
+    qcc_type_ctx tc;
+    qcc_type_ctx_init(&tc);
+
+    const qcc_type *ti = qcc_type_basic(&tc, QCC_TYPE_INT);
+    qcc_token       a  = id_tok("a");
+    qcc_token       op;
+    memset(&op, 0, sizeof(op));
+    op.kind        = QCC_TOKEN_PUNCT;
+    qcc_expr *ea   = qcc_expr_leaf(&ast, &a);
+
+    chk_dump(qcc_expr_cast(&ast, ti, ea, &op), "(cast int a)", "cast");
+    chk_dump(qcc_expr_sizeof_type(&ast, ti, &op), "(sizeof-type int)",
+             "sizeof type");
+    chk_dump(qcc_expr_alignof_type(&ast, ti, &op), "(alignof-type int)",
+             "alignof type");
+
+    /* A NULL type or operand yields NULL (mapped to QCC_ERR_OUT_OF_MEMORY/parse). */
+    QTEST_CHECK_TRUE(qcc_expr_cast(&ast, NULL, ea, &op) == NULL);
+    QTEST_CHECK_TRUE(qcc_expr_cast(&ast, ti, NULL, &op) == NULL);
+    QTEST_CHECK_TRUE(qcc_expr_sizeof_type(&ast, NULL, &op) == NULL);
+    QTEST_CHECK_TRUE(qcc_expr_alignof_type(&ast, NULL, &op) == NULL);
+
+    qcc_type_ctx_dispose(&tc);
+    qcc_ast_dispose(&ast);
+}
+
 static void test_kind_names(void)
 {
     QTEST_CHECK_SPAN(qcc_expr_kind_name(QCC_EXPR_BINARY),
@@ -118,6 +151,15 @@ static void test_kind_names(void)
     QTEST_CHECK_SPAN(qcc_expr_kind_name(QCC_EXPR_CALL),
                      strlen(qcc_expr_kind_name(QCC_EXPR_CALL)),
                      "call", "call name");
+    QTEST_CHECK_SPAN(qcc_expr_kind_name(QCC_EXPR_CAST),
+                     strlen(qcc_expr_kind_name(QCC_EXPR_CAST)),
+                     "cast", "cast name");
+    QTEST_CHECK_SPAN(qcc_expr_kind_name(QCC_EXPR_SIZEOF_TYPE),
+                     strlen(qcc_expr_kind_name(QCC_EXPR_SIZEOF_TYPE)),
+                     "sizeof-type", "sizeof-type name");
+    QTEST_CHECK_SPAN(qcc_expr_kind_name(QCC_EXPR_ALIGNOF_TYPE),
+                     strlen(qcc_expr_kind_name(QCC_EXPR_ALIGNOF_TYPE)),
+                     "alignof-type", "alignof-type name");
     QTEST_CHECK_SPAN(qcc_expr_kind_name((qcc_expr_kind)999),
                      strlen(qcc_expr_kind_name((qcc_expr_kind)999)),
                      "unknown", "out-of-range kind is total");
@@ -143,6 +185,7 @@ int main(void)
 {
     test_leaves();
     test_operators();
+    test_type_operands();
     test_kind_names();
     test_invalid_args();
     return qtest_report("ast");
