@@ -11,6 +11,7 @@
  */
 #include "parser/parser.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,6 +37,7 @@ qcc_status qcc_parser_init(qcc_parser *parser, const qcc_token *tokens,
     parser->capture_params  = 0;
     parser->cap_params      = NULL;
     parser->cap_param_count = 0;
+    parser->in_param_list   = 0;
     return QCC_OK;
 }
 
@@ -206,7 +208,29 @@ static qcc_expr *parse_primary(qcc_parser *p)
 {
     const qcc_token *t = peek(p);
     switch (t->kind) {
-    case QCC_TOKEN_IDENTIFIER:
+    case QCC_TOKEN_IDENTIFIER: {
+        /* §6.5.1/§6.7.2.2 ¶3: an enumeration constant is a primary expression of
+           type int. Fold it to that value here — consteval is pure and cannot
+           reach the symbol table (ADR-0026), so resolving the name at the parser,
+           which holds the table, lets an enum constant work in every integer
+           constant-expression site (array bound, case label, another enumerator). */
+        if (p->syms != NULL) {
+            const qcc_symbol *sym = qcc_symtab_lookup(
+                p->syms, t->spelling, t->spelling_len, QCC_NS_ORDINARY);
+            if (sym != NULL && sym->kind == QCC_SYM_ENUM_CONST) {
+                advance(p);
+                qcc_token lit = *t;          /* keep the name's spelling/location */
+                lit.kind      = QCC_TOKEN_INTEGER;
+                lit.int_value = (uint64_t)sym->enum_value;
+                lit.int_type  = QCC_INT_INT; /* enum constants have type int      */
+                qcc_expr *e = qcc_expr_leaf(p->ast, &lit);
+                return (e != NULL) ? e : fail_oom(p);
+            }
+        }
+        advance(p);
+        qcc_expr *e = qcc_expr_leaf(p->ast, t);
+        return (e != NULL) ? e : fail_oom(p);
+    }
     case QCC_TOKEN_INTEGER:
     case QCC_TOKEN_FLOATING:
     case QCC_TOKEN_CHAR:
@@ -601,6 +625,10 @@ static const qcc_type *parse_type_suffix(qcc_parser *p, const qcc_type *type,
 static void parse_declaration_specifiers(qcc_parser *p, declspec *ds);
 static const qcc_type *ds_base_type(qcc_parser *p, const declspec *ds,
                                     const qcc_token *loc);
+static const qcc_type *parse_enum_specifier(qcc_parser *p, const qcc_token *kw);
+static const qcc_type *parse_struct_union_specifier(qcc_parser *p,
+                                                    qcc_type_kind kind,
+                                                    const qcc_token *kw);
 
 static int at_keyword(const qcc_parser *p, qcc_keyword kw)
 {
@@ -762,6 +790,214 @@ static const qcc_type *ds_base_type(qcc_parser *p, const declspec *ds,
     return base;
 }
 
+/* §6.7.2.2 ¶2: an enumerator's value must be representable as an int. */
+static int enum_value_fits_int(int64_t v)
+{
+    return v >= (int64_t)INT32_MIN && v <= (int64_t)INT32_MAX;
+}
+
+/* Recover from a malformed enumerator body by consuming up to and including the
+   closing '}'. The body holds only constant expressions (no nested braces), so the
+   first '}' ends it; stops at EOF so a missing '}' cannot loop forever. */
+static void skip_to_rbrace(qcc_parser *p)
+{
+    for (;;) {
+        const qcc_token *t = peek(p);
+        if (t->kind == QCC_TOKEN_EOF) {
+            return;
+        }
+        if (t->kind == QCC_TOKEN_PUNCT && t->punct == QCC_PUNCT_RBRACE) {
+            advance(p);
+            return;
+        }
+        advance(p);
+    }
+}
+
+/*
+ * struct-or-union-specifier (§6.7.2.1), the `struct`/`union` keyword already
+ * consumed. A definition needs member layout per the System V x86-64 psABI and is
+ * deferred (ADR-0026): a braced body is diagnosed and skipped, leaving an
+ * incomplete tagged type so the surrounding declaration still parses. Returns the
+ * tagged type, or NULL only on out-of-memory (p->oom set).
+ */
+static const qcc_type *parse_struct_union_specifier(qcc_parser *p,
+                                                    qcc_type_kind kind,
+                                                    const qcc_token *kw)
+{
+    (void)kw;
+    const qcc_token *tag = NULL;
+    if (peek(p)->kind == QCC_TOKEN_IDENTIFIER) {
+        tag = peek(p);
+        advance(p);
+    }
+    if (at_punct(p, QCC_PUNCT_LBRACE)) {
+        parse_error(p, peek(p), "struct/union definitions are not supported yet");
+        skip_balanced_braces(p);
+    }
+    const qcc_type *tt = qcc_type_tagged(p->types, kind,
+                                         tag ? tag->spelling : NULL,
+                                         tag ? tag->spelling_len : 0, 0);
+    if (tt == NULL) {
+        p->oom = 1;
+    }
+    return tt;
+}
+
+/*
+ * enum-specifier (§6.7.2.2), the `enum` keyword already consumed (`kw` locates it
+ * for diagnostics). Three shapes:
+ *   - `enum tag`              — a reference (§6.7.2.3): resolve `tag` to its visible
+ *                               (possibly complete) type, else an incomplete enum.
+ *   - `enum [tag] { list }`   — a definition: parse the enumerator-list, give each
+ *                               constant a value (an explicit `= constant-expression`
+ *                               via consteval, else the previous value + 1, the first
+ *                               0, §6.7.2.2 ¶3), register it (type int, §6.7.2.2 ¶3),
+ *                               complete the type and register the tag (§6.7.2.3).
+ * Returns the enum type, or NULL only on out-of-memory (p->oom set); recoverable
+ * syntax errors set p->had_error but still yield a type so the declaration parses.
+ */
+static const qcc_type *parse_enum_specifier(qcc_parser *p, const qcc_token *kw)
+{
+    const qcc_token *tag = NULL;
+    if (peek(p)->kind == QCC_TOKEN_IDENTIFIER) {
+        tag = peek(p);
+        advance(p);
+    }
+
+    if (!at_punct(p, QCC_PUNCT_LBRACE)) {
+        /* A reference. Use the visible definition if there is one (§6.7.2.3 ¶7
+           requires the type be complete; we are lenient and forward-declare). */
+        if (tag != NULL && p->syms != NULL) {
+            const qcc_symbol *prev = qcc_symtab_lookup(
+                p->syms, tag->spelling, tag->spelling_len, QCC_NS_TAG);
+            if (prev != NULL && prev->type != NULL &&
+                prev->type->kind == QCC_TYPE_ENUM) {
+                return prev->type;
+            }
+        }
+        const qcc_type *ref = qcc_type_tagged(
+            p->types, QCC_TYPE_ENUM, tag ? tag->spelling : NULL,
+            tag ? tag->spelling_len : 0, 0);
+        if (ref == NULL) {
+            p->oom = 1;
+        }
+        return ref;
+    }
+
+    advance(p); /* '{' — a definition begins. */
+
+    /* §6.7.2.3 ¶8: a tag may be defined only once in a scope. Skipped inside a
+       parameter-type-list, where nothing is registered (see below). */
+    if (tag != NULL && p->syms != NULL && !p->in_param_list) {
+        const qcc_symbol *prev = qcc_symtab_lookup_current_scope(
+            p->syms, tag->spelling, tag->spelling_len, QCC_NS_TAG);
+        if (prev != NULL && prev->type != NULL && prev->type->complete) {
+            parse_error(p, tag, "redefinition of enumeration tag");
+        }
+    }
+
+    const qcc_type *int_ty = qcc_type_basic(p->types, QCC_TYPE_INT);
+    if (int_ty == NULL) {
+        p->oom = 1;
+        return NULL;
+    }
+
+    if (at_punct(p, QCC_PUNCT_RBRACE)) {
+        /* §6.7.2.2 ¶1: the enumerator-list shall have at least one enumerator. */
+        parse_error(p, kw, "an enumeration requires at least one enumerator");
+        advance(p); /* consume the '}' */
+    } else {
+        int64_t next  = 0; /* §6.7.2.2 ¶3: the first unspecified enumerator is 0. */
+        int     broke = 0; /* set once recovery has consumed past the '}' */
+        for (;;) {
+            if (peek(p)->kind != QCC_TOKEN_IDENTIFIER) {
+                parse_error(p, peek(p), "expected an enumeration constant");
+                skip_to_rbrace(p);
+                broke = 1;
+                break;
+            }
+            const qcc_token *name  = peek(p);
+            int64_t          value = next;
+            advance(p);
+
+            if (at_punct(p, QCC_PUNCT_EQ)) {
+                advance(p);
+                qcc_expr *ve = parse_conditional(p); /* constant-expression §6.6 */
+                if (ve == NULL) {
+                    if (!p->oom) {
+                        skip_to_rbrace(p);
+                        broke = 1;
+                    }
+                    break;
+                }
+                qcc_const_value cv;
+                if (qcc_eval_const_int(ve, &cv) != QCC_OK) {
+                    parse_error(p, name, "enumerator value is not an integer "
+                                         "constant expression");
+                } else {
+                    value = (int64_t)cv.value;
+                }
+            }
+            if (!enum_value_fits_int(value)) {
+                parse_error(p, name,
+                            "enumerator value is not representable as int");
+            }
+
+            /* A constant defined in a parameter-type-list has prototype scope
+               (§6.2.1 ¶4) we do not model, so register only outside one. */
+            if (p->syms != NULL && !p->in_param_list) {
+                if (qcc_symtab_lookup_current_scope(p->syms, name->spelling,
+                                                    name->spelling_len,
+                                                    QCC_NS_ORDINARY) != NULL) {
+                    parse_error(p, name, "redeclaration of enumeration constant");
+                }
+                if (qcc_symtab_insert_enum_const(
+                        p->syms, name->spelling, name->spelling_len, int_ty, value,
+                        name->source, name->offset, name->line, name->column,
+                        NULL) != QCC_OK) {
+                    p->oom = 1;
+                    return NULL;
+                }
+            }
+            next = value + 1; /* §6.7.2.2 ¶3: the next defaults to one more. */
+
+            if (at_punct(p, QCC_PUNCT_COMMA)) {
+                advance(p);
+                if (at_punct(p, QCC_PUNCT_RBRACE)) {
+                    break; /* §6.7.2.2: a trailing comma is permitted. */
+                }
+                continue;
+            }
+            break;
+        }
+
+        if (!broke && !expect_punct(p, QCC_PUNCT_RBRACE,
+                                    "expected ',' or '}' in enumerator list")) {
+            skip_to_rbrace(p);
+        }
+        if (p->oom) {
+            return NULL;
+        }
+    }
+
+    const qcc_type *enum_ty = qcc_type_tagged(
+        p->types, QCC_TYPE_ENUM, tag ? tag->spelling : NULL,
+        tag ? tag->spelling_len : 0, 1 /* complete */);
+    if (enum_ty == NULL) {
+        p->oom = 1;
+        return NULL;
+    }
+    if (tag != NULL && p->syms != NULL && !p->in_param_list &&
+        qcc_symtab_insert(p->syms, tag->spelling, tag->spelling_len, QCC_NS_TAG,
+                          QCC_SYM_TAG, enum_ty, tag->source, tag->offset, tag->line,
+                          tag->column, NULL) != QCC_OK) {
+        p->oom = 1;
+        return NULL;
+    }
+    return enum_ty;
+}
+
 static void parse_declaration_specifiers(qcc_parser *p, declspec *ds)
 {
     memset(ds, 0, sizeof(*ds));
@@ -806,26 +1042,17 @@ static void parse_declaration_specifiers(qcc_parser *p, declspec *ds)
                 advance(p);
                 continue;
             case QCC_KW_STRUCT: case QCC_KW_UNION: case QCC_KW_ENUM: {
-                qcc_type_kind tk = (kw == QCC_KW_STRUCT) ? QCC_TYPE_STRUCT
-                                 : (kw == QCC_KW_UNION)  ? QCC_TYPE_UNION
-                                                         : QCC_TYPE_ENUM;
-                advance(p);
-                const qcc_token *tag = NULL;
-                if (peek(p)->kind == QCC_TOKEN_IDENTIFIER) {
-                    tag = peek(p);
-                    advance(p);
-                }
-                if (at_punct(p, QCC_PUNCT_LBRACE)) {
-                    parse_error(p, peek(p),
-                                "struct/union/enum definitions are not supported yet");
-                    skip_balanced_braces(p);
-                }
-                const qcc_type *tt = qcc_type_tagged(
-                    p->types, tk, tag ? tag->spelling : NULL,
-                    tag ? tag->spelling_len : 0, 0);
+                advance(p); /* struct / union / enum keyword */
+                const qcc_type *tt =
+                    (kw == QCC_KW_ENUM)
+                        ? parse_enum_specifier(p, t)
+                        : parse_struct_union_specifier(
+                              p,
+                              (kw == QCC_KW_STRUCT) ? QCC_TYPE_STRUCT
+                                                    : QCC_TYPE_UNION,
+                              t);
                 if (tt == NULL) {
-                    p->oom = 1;
-                    return;
+                    return; /* out-of-memory; p->oom set by the helper. */
                 }
                 ds->named_type     = tt;
                 ds->has_named_type = 1;
@@ -905,7 +1132,10 @@ static const qcc_type *parse_func_params(qcc_parser *p, const qcc_type *ret)
             }
             const qcc_token *ploc = peek(p);
             declspec         ds;
+            int              saved_in_param = p->in_param_list;
+            p->in_param_list = 1; /* suppress prototype-scope tag registration */
             parse_declaration_specifiers(p, &ds);
+            p->in_param_list = saved_in_param;
             const qcc_type  *pbase = p->oom ? NULL : ds_base_type(p, &ds, ploc);
             const qcc_token *pname = NULL;
             const qcc_type  *pt =
@@ -1231,31 +1461,25 @@ static qcc_status parse_static_assert(qcc_parser *p)
     return p->had_error ? QCC_ERR_PARSE : QCC_OK;
 }
 
-qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
+/*
+ * Parse the init-declarator list of a declaration given already-parsed specifiers
+ * (`ds`/`base`, with `specloc` for the provenance of an abstract declarator). The
+ * cursor is positioned just past the declaration-specifiers. Each declared name is
+ * registered (§6.7.8 typedef-names go in as such) and appended to `out` as a
+ * qcc_decl; the no-declarator case (a bare ';' after, e.g., a struct/enum
+ * specifier) and the trailing ';' are handled here.
+ *
+ * Splitting this out of qcc_parse_declaration lets qcc_parse_external_declaration
+ * parse the specifiers exactly once: a tagged-type specifier — an enum definition
+ * (ADR-0026) — registers its tag and constants as a side effect, which must not run
+ * twice, so the external-declaration path can no longer re-parse from the start.
+ */
+static qcc_status parse_init_declarators(qcc_parser *p, const declspec *ds,
+                                         const qcc_type *base,
+                                         const qcc_token *specloc,
+                                         qcc_decl_list *out)
 {
-    if (p == NULL || out == NULL) {
-        return QCC_ERR_INVALID_ARGUMENT;
-    }
-    if (p->types == NULL || p->syms == NULL) {
-        return QCC_ERR_INVALID_ARGUMENT;
-    }
-
-    if (at_keyword(p, QCC_KW_STATIC_ASSERT)) {
-        return parse_static_assert(p);
-    }
-
-    const qcc_token *specloc = peek(p);
-    declspec         ds;
-    parse_declaration_specifiers(p, &ds);
-    if (p->oom) {
-        return QCC_ERR_OUT_OF_MEMORY;
-    }
-    const qcc_type *base = ds_base_type(p, &ds, specloc);
-    if (base == NULL) {
-        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
-    }
-
-    /* A declaration with no declarators (e.g. `struct foo;`). */
+    /* A declaration with no declarators (e.g. `struct foo;`, `enum E { A };`). */
     if (at_punct(p, QCC_PUNCT_SEMI)) {
         advance(p);
         return p->had_error ? QCC_ERR_PARSE : QCC_OK;
@@ -1279,8 +1503,8 @@ qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
 
         qcc_decl d;
         memset(&d, 0, sizeof(d));
-        d.storage   = ds.storage;
-        d.func_spec = ds.func_spec;
+        d.storage   = ds->storage;
+        d.func_spec = ds->func_spec;
         d.type      = full;
         d.init      = init;
         if (name != NULL) {
@@ -1291,7 +1515,7 @@ qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
             d.line     = name->line;
             d.column   = name->column;
 
-            qcc_sym_kind k = (ds.storage == QCC_SC_TYPEDEF)
+            qcc_sym_kind k = (ds->storage == QCC_SC_TYPEDEF)
                                  ? QCC_SYM_TYPEDEF
                                  : (full->kind == QCC_TYPE_FUNCTION
                                         ? QCC_SYM_FUNCTION
@@ -1323,6 +1547,32 @@ qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
         return QCC_ERR_PARSE;
     }
     return p->had_error ? QCC_ERR_PARSE : QCC_OK;
+}
+
+qcc_status qcc_parse_declaration(qcc_parser *p, qcc_decl_list *out)
+{
+    if (p == NULL || out == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+    if (p->types == NULL || p->syms == NULL) {
+        return QCC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (at_keyword(p, QCC_KW_STATIC_ASSERT)) {
+        return parse_static_assert(p);
+    }
+
+    const qcc_token *specloc = peek(p);
+    declspec         ds;
+    parse_declaration_specifiers(p, &ds);
+    if (p->oom) {
+        return QCC_ERR_OUT_OF_MEMORY;
+    }
+    const qcc_type *base = ds_base_type(p, &ds, specloc);
+    if (base == NULL) {
+        return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
+    }
+    return parse_init_declarators(p, &ds, base, specloc, out);
 }
 
 /*
@@ -1786,8 +2036,31 @@ qcc_status qcc_parse_statement(qcc_parser *p, qcc_stmt **out)
  * the first declarator (a '{' begins a function body).
  */
 
-/* Parse an ordinary declaration at the cursor and store its init-declarators in
-   `out` (an arena-owned copy). Shared by the no-declarator and non-function paths. */
+/* Move a parsed init-declarator list into an external-declaration result (an
+   arena-owned copy of the decls), then dispose the transient list. */
+static qcc_status decls_into_extern(qcc_parser *p, qcc_decl_list *decls,
+                                    qcc_extern_decl *out)
+{
+    out->is_function = 0;
+    out->decls       = NULL;
+    out->decl_count  = 0;
+    if (decls->count != 0) {
+        qcc_decl *owned = (qcc_decl *)qcc_ast_dup(p->ast, decls->items,
+                                                  decls->count * sizeof(*owned));
+        if (owned == NULL) {
+            qcc_decl_list_dispose(decls);
+            p->oom = 1;
+            return QCC_ERR_OUT_OF_MEMORY;
+        }
+        out->decls      = owned;
+        out->decl_count = decls->count;
+    }
+    qcc_decl_list_dispose(decls);
+    return QCC_OK;
+}
+
+/* Parse a whole declaration at the cursor (specifiers included) into `out`. Used
+   for the static_assert-declaration, which has no declaration-specifiers. */
 static qcc_status parse_declaration_into_extern(qcc_parser *p,
                                                 qcc_extern_decl *out)
 {
@@ -1798,22 +2071,26 @@ static qcc_status parse_declaration_into_extern(qcc_parser *p,
         qcc_decl_list_dispose(&decls);
         return st;
     }
-    out->is_function = 0;
-    out->decls       = NULL;
-    out->decl_count  = 0;
-    if (decls.count != 0) {
-        qcc_decl *owned = (qcc_decl *)qcc_ast_dup(p->ast, decls.items,
-                                                  decls.count * sizeof(*owned));
-        if (owned == NULL) {
-            qcc_decl_list_dispose(&decls);
-            p->oom = 1;
-            return QCC_ERR_OUT_OF_MEMORY;
-        }
-        out->decls      = owned;
-        out->decl_count = decls.count;
+    return decls_into_extern(p, &decls, out);
+}
+
+/* Finish an ordinary declaration whose specifiers were already parsed (`ds`/`base`),
+   storing its init-declarators in `out`. The no-declarator and non-function paths
+   share this so the specifiers — and an enum specifier's registrations (ADR-0026) —
+   are parsed exactly once. */
+static qcc_status init_declarators_into_extern(qcc_parser *p, const declspec *ds,
+                                               const qcc_type *base,
+                                               const qcc_token *specloc,
+                                               qcc_extern_decl *out)
+{
+    qcc_decl_list decls;
+    qcc_decl_list_init(&decls);
+    qcc_status st = parse_init_declarators(p, ds, base, specloc, &decls);
+    if (st != QCC_OK) {
+        qcc_decl_list_dispose(&decls);
+        return st;
     }
-    qcc_decl_list_dispose(&decls);
-    return QCC_OK;
+    return decls_into_extern(p, &decls, out);
 }
 
 /* The body of a function definition: the function name is registered at file
@@ -1884,7 +2161,6 @@ qcc_status qcc_parse_external_declaration(qcc_parser *p, qcc_extern_decl *out)
         return parse_declaration_into_extern(p, out);
     }
 
-    size_t           start   = p->pos;
     const qcc_token *specloc = peek(p);
     declspec         ds;
     parse_declaration_specifiers(p, &ds);
@@ -1895,16 +2171,16 @@ qcc_status qcc_parse_external_declaration(qcc_parser *p, qcc_extern_decl *out)
     if (base == NULL) {
         return p->oom ? QCC_ERR_OUT_OF_MEMORY : QCC_ERR_PARSE;
     }
+    size_t decl_start = p->pos; /* where the declarators begin (after specifiers) */
 
-    /* A declaration with no declarators (e.g. `struct foo;`): hand the whole thing
-       to the declaration parser. */
+    /* A declaration with no declarators (e.g. `struct foo;`, `enum E { A };`). */
     if (at_punct(p, QCC_PUNCT_SEMI)) {
-        p->pos = start;
-        return parse_declaration_into_extern(p, out);
+        return init_declarators_into_extern(p, &ds, base, specloc, out);
     }
 
-    /* Parse the first declarator, capturing parameter names in case a function
-       body follows. */
+    /* Speculatively parse the first declarator — side-effect-free apart from the
+       cursor — to learn whether a function body follows, capturing parameter names
+       in case it does. */
     p->capture_params  = 1;
     p->cap_params      = NULL;
     p->cap_param_count = 0;
@@ -1923,8 +2199,9 @@ qcc_status qcc_parse_external_declaration(qcc_parser *p, qcc_extern_decl *out)
                                          out);
     }
 
-    /* Not a function definition: re-parse the whole declaration (the speculative
-       declarator parse mutated no symbol-table state, only the cursor). */
-    p->pos = start;
-    return parse_declaration_into_extern(p, out);
+    /* Not a function definition. Rewind to the declarators (not to the start: the
+       specifiers were parsed once and an enum definition has already registered its
+       tag and constants, ADR-0026) and parse the init-declarator list. */
+    p->pos = decl_start;
+    return init_declarators_into_extern(p, &ds, base, specloc, out);
 }

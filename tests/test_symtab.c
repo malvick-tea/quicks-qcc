@@ -200,6 +200,38 @@ static void test_invalid_args(void)
     qcc_symtab_dispose(&tab);
 }
 
+static void test_enum_constant(void)
+{
+    /* qcc_symtab_insert_enum_const records the §6.7.2.2 value alongside the kind,
+       and reads back through an ordinary-name-space lookup (including a negative
+       value, which the int64_t field must preserve). */
+    qcc_type_ctx tc;
+    qcc_type_ctx_init(&tc);
+    qcc_symtab tab;
+    qcc_symtab_init(&tab);
+    const qcc_type *int_t = qcc_type_basic(&tc, QCC_TYPE_INT);
+
+    QTEST_CHECK_EQ_INT(qcc_symtab_insert_enum_const(&tab, "RED", 3, int_t, 0,
+                                                    NULL, 0, 0, 0, NULL),
+                       QCC_OK, "insert RED");
+    QTEST_CHECK_EQ_INT(qcc_symtab_insert_enum_const(&tab, "LOW", 3, int_t, -1,
+                                                    NULL, 0, 0, 0, NULL),
+                       QCC_OK, "insert LOW");
+
+    const qcc_symbol *red = get(&tab, "RED");
+    QTEST_CHECK_TRUE(red != NULL && red->kind == QCC_SYM_ENUM_CONST);
+    QTEST_CHECK_EQ_INT((int)red->enum_value, 0, "RED value");
+    const qcc_symbol *low = get(&tab, "LOW");
+    QTEST_CHECK_TRUE(low != NULL && low->kind == QCC_SYM_ENUM_CONST);
+    QTEST_CHECK_EQ_INT((int)low->enum_value, -1, "LOW value");
+
+    /* An enum constant is an ordinary identifier, not a typedef-name (§6.7.8). */
+    QTEST_CHECK_TRUE(!qcc_symtab_is_typedef_name(&tab, "RED", 3));
+
+    qcc_symtab_dispose(&tab);
+    qcc_type_ctx_dispose(&tc);
+}
+
 int main(void)
 {
     test_basic_insert_lookup();
@@ -209,5 +241,6 @@ int main(void)
     test_redeclaration_check();
     test_many_symbols();
     test_invalid_args();
+    test_enum_constant();
     return qtest_report("symtab");
 }

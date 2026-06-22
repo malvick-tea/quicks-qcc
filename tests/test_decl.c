@@ -241,6 +241,58 @@ static void test_type_name_and_predicate(void)
     free(dump);
 }
 
+static void test_enum(void)
+{
+    /* A definition completes the tagged type; the declared object has it. */
+    chk("enum Color { RED, GREEN, BLUE } c;", "c: enum Color");
+    chk("enum { X, Y } v;", "v: enum <anonymous>");
+    /* A tag-only definition declares no object. */
+    chk("enum Color { RED, GREEN, BLUE };", "");
+
+    /*
+     * The constants are integer constant expressions of type int (§6.7.2.2 ¶3):
+     * a _Static_assert folds them through consteval, so a clean parse (no error)
+     * proves each constant carries the right value. This is the contract that lets
+     * enum constants appear anywhere a constant is permitted.
+     */
+    chk("enum E { A, B, C }; "
+        "_Static_assert(A == 0 && B == 1 && C == 2, \"sequential\");",
+        "");
+    chk("enum E { A = 5, B, C = 10, D }; "
+        "_Static_assert(A == 5 && B == 6 && C == 10 && D == 11, \"explicit\");",
+        "");
+    chk("enum E { A = -1, B, C }; "
+        "_Static_assert(A == -1 && B == 0 && C == 1, \"negative start\");",
+        "");
+    chk("enum E { A = 1 << 4, B = A + 1 }; "
+        "_Static_assert(A == 16 && B == 17, \"const-expr + self ref\");",
+        "");
+
+    /* An enum constant drives an array bound — the §6.7.6.2 / ADR-0025 motivation. */
+    chk("enum { N = 3 }; int a[N];", "a: array[3] of int");
+    chk("enum { N = 2 }; int a[N + 1];", "a: array[3] of int");
+
+    /* A later reference resolves to the completed definition (§6.7.2.3). */
+    chk("enum Color { RED, GREEN }; enum Color c;", "c: enum Color");
+
+    /*
+     * Constraint violations (§6.7.2.2 / §6.7.2.3): a non-constant or floating
+     * value, an out-of-int-range value (¶2), an empty list (¶1), a duplicate
+     * constant, and a same-scope tag redefinition (§6.7.2.3 ¶8).
+     */
+    chk_error("enum E { A = x };");
+    chk_error("enum E { A = 1.5 };");
+    chk_error("enum E { A = 0x80000000 };");
+    chk_error("enum { };");
+    chk_error("enum E { A, A };");
+    chk_error("enum E { A }; enum E { B };");
+
+    /* A type defined in a prototype's parameter list has prototype scope only
+       (§6.2.1 ¶4): the type is still built (the parameter has it), but nothing is
+       registered, so this is well-formed and the constants do not leak out. */
+    chk("int g(enum E { X, Y } p);", "g: function(enum E) returning int");
+}
+
 int main(void)
 {
     test_basic_objects();
@@ -254,5 +306,6 @@ int main(void)
     test_static_assert();
     test_errors();
     test_type_name_and_predicate();
+    test_enum();
     return qtest_report("decl");
 }

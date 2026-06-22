@@ -79,6 +79,16 @@ typedef struct qcc_parser {
     int              capture_params;
     const qcc_param *cap_params;
     size_t           cap_param_count;
+
+    /* Set while parsing a function declarator's parameter-type-list (§6.7.6.3),
+       private. A struct/union/enum *defined* there has a scope limited to that
+       prototype (§6.2.1 ¶4, §6.7.2.3) and is therefore useless; we do not model
+       prototype scope, so the enum specifier builds the type but registers nothing
+       (ADR-0026). This also keeps the speculative func-detection parse free of
+       symbol-table side effects, so re-parsing the declarators cannot double-
+       register. Nests (a parameter that is itself a function pointer), so it is
+       saved/restored rather than cleared. */
+    int              in_param_list;
 } qcc_parser;
 
 /*

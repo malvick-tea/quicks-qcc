@@ -123,11 +123,17 @@ unsigned qcc_symtab_depth(const qcc_symtab *tab)
                : 0u;
 }
 
-qcc_status qcc_symtab_insert(qcc_symtab *tab, const char *name, size_t name_len,
-                             qcc_sym_namespace ns, qcc_sym_kind kind,
-                             const qcc_type *type, const struct qcc_source *source,
-                             size_t offset, uint32_t line, uint32_t column,
-                             const qcc_symbol **out)
+/*
+ * The shared insertion core. `enum_value` is meaningful only for an enum constant
+ * (kind == QCC_SYM_ENUM_CONST) and 0 for every other binding. Both public entry
+ * points funnel here so the bucket/scope linking lives in exactly one place.
+ */
+static qcc_status insert_symbol(qcc_symtab *tab, const char *name, size_t name_len,
+                                qcc_sym_namespace ns, qcc_sym_kind kind,
+                                const qcc_type *type, int64_t enum_value,
+                                const struct qcc_source *source, size_t offset,
+                                uint32_t line, uint32_t column,
+                                const qcc_symbol **out)
 {
     if (out != NULL) {
         *out = NULL;
@@ -145,17 +151,18 @@ qcc_status qcc_symtab_insert(qcc_symtab *tab, const char *name, size_t name_len,
         return QCC_ERR_OUT_OF_MEMORY;
     }
 
-    sym->name     = (name_len != 0) ? owned : "";
-    sym->name_len = name_len;
-    sym->ns       = ns;
-    sym->kind     = kind;
-    sym->type     = type;
-    sym->source   = source;
-    sym->offset   = offset;
-    sym->line     = line;
-    sym->column   = column;
-    sym->depth    = (unsigned)(tab->scope_count - 1);
-    sym->hash     = hash_name(name, name_len);
+    sym->name       = (name_len != 0) ? owned : "";
+    sym->name_len   = name_len;
+    sym->ns         = ns;
+    sym->kind       = kind;
+    sym->type       = type;
+    sym->enum_value = enum_value;
+    sym->source     = source;
+    sym->offset     = offset;
+    sym->line       = line;
+    sym->column     = column;
+    sym->depth      = (unsigned)(tab->scope_count - 1);
+    sym->hash       = hash_name(name, name_len);
 
     size_t idx       = (size_t)(sym->hash & (tab->bucket_count - 1));
     sym->bucket_next = tab->buckets[idx];
@@ -170,6 +177,27 @@ qcc_status qcc_symtab_insert(qcc_symtab *tab, const char *name, size_t name_len,
         *out = sym;
     }
     return QCC_OK;
+}
+
+qcc_status qcc_symtab_insert(qcc_symtab *tab, const char *name, size_t name_len,
+                             qcc_sym_namespace ns, qcc_sym_kind kind,
+                             const qcc_type *type, const struct qcc_source *source,
+                             size_t offset, uint32_t line, uint32_t column,
+                             const qcc_symbol **out)
+{
+    return insert_symbol(tab, name, name_len, ns, kind, type, 0, source, offset,
+                         line, column, out);
+}
+
+qcc_status qcc_symtab_insert_enum_const(qcc_symtab *tab, const char *name,
+                                        size_t name_len, const qcc_type *type,
+                                        int64_t value,
+                                        const struct qcc_source *source,
+                                        size_t offset, uint32_t line,
+                                        uint32_t column, const qcc_symbol **out)
+{
+    return insert_symbol(tab, name, name_len, QCC_NS_ORDINARY, QCC_SYM_ENUM_CONST,
+                         type, value, source, offset, line, column, out);
 }
 
 const qcc_symbol *qcc_symtab_lookup(const qcc_symtab *tab, const char *name,

@@ -158,6 +158,33 @@ static void test_parameter_scope(void)
         "(decl T); (func g () (block (decl x) (return x)))");
 }
 
+static void test_enum_definitions(void)
+{
+    /*
+     * Enum definitions through the external-declaration path (ADR-0026). This path
+     * speculatively parses the first declarator to detect a function body and then,
+     * for an ordinary declaration, re-parses the declarators — so the specifiers
+     * (which now register the tag and constants) must be parsed exactly once. A
+     * regression would re-register and report a spurious "redefinition".
+     */
+    chk("enum Color { RED, GREEN, BLUE };", "(decl)");      /* no declarator     */
+    chk("enum Color { RED, GREEN, BLUE } c;", "(decl c)");  /* with a declarator */
+    chk("enum { N = 4 }; int buf[N];", "(decl); (decl buf)");
+
+    /* An enum return type whose constants are folded inside the body. */
+    chk("enum E { A, B } pick(void) { return B; }",
+        "(func pick () (block (return 1)))");
+
+    /* A definition followed by a reference resolving to it, then a use. */
+    chk("enum S { OFF, ON }; enum S flag; int read(void) { return ON; }",
+        "(decl); (decl flag); (func read () (block (return 1)))");
+
+    /* A type defined in a prototype's parameter list has prototype scope only
+       (§6.2.1 ¶4); it registers nothing and so must parse cleanly even though the
+       parameter list is parsed twice (speculatively, then for real). */
+    chk("int g(enum E { X, Y } p);", "(decl g)");
+}
+
 static void test_errors(void)
 {
     chk_error("int 3;");              /* not a declarator */
@@ -189,6 +216,7 @@ int main(void)
     test_function_definitions();
     test_translation_unit();
     test_parameter_scope();
+    test_enum_definitions();
     test_errors();
     test_invalid_args();
     return qtest_report("extdef");

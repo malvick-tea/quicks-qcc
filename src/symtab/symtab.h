@@ -70,6 +70,7 @@ typedef struct qcc_symbol {
     qcc_sym_namespace        ns;
     qcc_sym_kind             kind;
     const qcc_type          *type;     /* Borrowed (from a qcc_type_ctx).        */
+    int64_t                  enum_value; /* §6.7.2.2 value; iff kind==ENUM_CONST. */
     const struct qcc_source *source;   /* Provenance; may be NULL.               */
     size_t                   offset;
     uint32_t                 line;
@@ -131,6 +132,21 @@ qcc_status qcc_symtab_insert(qcc_symtab *tab, const char *name, size_t name_len,
                              const qcc_type *type, const struct qcc_source *source,
                              size_t offset, uint32_t line, uint32_t column,
                              const qcc_symbol **out);
+
+/*
+ * Insert an enumeration constant (§6.7.2.2) in the current scope: an ordinary-name-
+ * space binding of kind QCC_SYM_ENUM_CONST whose `value` — an int (§6.7.2.2 ¶3),
+ * widened to int64_t here — is recorded so the parser can fold the constant into
+ * integer constant expressions. Otherwise identical to qcc_symtab_insert (same name
+ * copy, shadowing, *out, and return contract); the caller checks for a same-scope
+ * redeclaration first if it wants to diagnose one.
+ */
+qcc_status qcc_symtab_insert_enum_const(qcc_symtab *tab, const char *name,
+                                        size_t name_len, const qcc_type *type,
+                                        int64_t value,
+                                        const struct qcc_source *source,
+                                        size_t offset, uint32_t line,
+                                        uint32_t column, const qcc_symbol **out);
 
 /* Look up `name` in name space `ns`, innermost scope outward; NULL if unbound. */
 const qcc_symbol *qcc_symtab_lookup(const qcc_symtab *tab, const char *name,
